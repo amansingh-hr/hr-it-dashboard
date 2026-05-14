@@ -1127,7 +1127,7 @@ HTML = """<!DOCTYPE html>
     <button class="tab active" onclick="switchTab('overview', this)">📊 Overview</button>
     <button class="tab" onclick="switchTab('devices', this)">🖥️ All Devices</button>
     <button class="tab" onclick="switchTab('users', this)">👥 Users</button>
-    <button class="tab" onclick="switchTab('orphaned', this)">🚨 Orphaned Devices</button>
+    <button class="tab" onclick="switchTab('orphaned', this)">🚨 Pending Returns</button>
     <button class="tab" onclick="switchTab('departments', this)">🏢 By Department</button>
     <button class="tab" onclick="switchTab('admin', this)" style="margin-left:auto">🔐 Admin</button>
   </div>
@@ -1339,7 +1339,7 @@ HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- ── Tab: Orphaned Devices ── -->
+  <!-- ── Tab: Pending Returns ── -->
   <div class="tab-panel" id="tab-orphaned">
     <div id="orphanedBanner" class="alert-banner" style="display:none">
       <div class="alert-banner-icon">⚠️</div>
@@ -1351,7 +1351,7 @@ HTML = """<!DOCTYPE html>
     </div>
     <div id="orphanedEmpty" style="display:none;text-align:center;padding:60px;color:#64748b">
       <div style="font-size:40px;margin-bottom:12px">✅</div>
-      <div style="font-size:15px">No orphaned devices found — all assigned users are active in Okta.</div>
+      <div style="font-size:15px">No pending returns found — all assigned users are active in Okta.</div>
     </div>
     <div id="orphanedNoOkta" style="text-align:center;padding:60px;color:#64748b">
       <div style="font-size:40px;margin-bottom:12px">🔑</div>
@@ -2478,7 +2478,7 @@ HTML = """<!DOCTYPE html>
     return `<span class="badge ${cls}">${s || 'UNKNOWN'}</span>`;
   }
 
-  // ── Render: Orphaned Devices tab ─────────────────────────────────────────
+  // ── Render: Pending Returns tab ─────────────────────────────────────────
   function renderOrphaned() {
     const hasOkta = Object.keys(oktaUserMap).length > 0;
 
