@@ -2952,7 +2952,7 @@ HTML = """<!DOCTYPE html>
                     <div style="font-size:13px;font-weight:500">${esc(d.device_name)} ${kandjiLink(d)}</div>
                     <div style="font-size:12px;color:#94a3b8">${esc(d.model)} · S/N: ${esc(d.serial_number||'—')}</div>
                   </div>
-                  <span style="font-size:12px;color:${received ? '#22c55e' : '#f87171'}">${received ? 'Received ✓' : 'Pending'}</span>
+                  <span id="recvBadge_${d.device_id}" style="font-size:11px;font-weight:600;padding:3px 10px;border-radius:12px;white-space:nowrap;${received ? 'background:#14532d;color:#86efac' : 'background:#431a1a;color:#fca5a5'}">${received ? '✓ Received' : '⏳ Pending'}</span>
                 </div>
                 ${received && devRec.received_at ? `<div style="font-size:11px;color:#64748b;margin-top:4px;padding-left:26px">Received: ${devRec.received_at.slice(0,10)}</div>` : ''}
               </div>`;
@@ -2969,7 +2969,7 @@ HTML = """<!DOCTYPE html>
               onblur="saveOffboardField('${email}','outbound_tracking',this.value)"
               style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:7px 10px;color:#f1f5f9;font-size:13px">
             <button class="btn btn-secondary" style="font-size:12px;padding:6px 12px;white-space:nowrap"
-              onclick="trackFedEx('outboundTracking','outboundStatus')">Track</button>
+              onclick="saveOffboardField('${email}','outbound_tracking',document.getElementById('outboundTracking').value);trackFedEx('outboundTracking','outboundStatus')">Track</button>
           </div>
           <div id="outboundStatus" style="font-size:12px;color:#94a3b8;margin-top:6px;min-height:16px"></div>
         </div>
@@ -2982,7 +2982,7 @@ HTML = """<!DOCTYPE html>
               onblur="saveOffboardField('${email}','return_tracking',this.value)"
               style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:7px 10px;color:#f1f5f9;font-size:13px">
             <button class="btn btn-secondary" style="font-size:12px;padding:6px 12px;white-space:nowrap"
-              onclick="trackFedEx('returnTracking','returnStatus')">Track</button>
+              onclick="saveOffboardField('${email}','return_tracking',document.getElementById('returnTracking').value);trackFedEx('returnTracking','returnStatus')">Track</button>
           </div>
           <div id="returnStatus" style="font-size:12px;color:#94a3b8;margin-top:6px;min-height:16px"></div>
         </div>
@@ -2997,6 +2997,10 @@ HTML = """<!DOCTYPE html>
           style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px">Save Notes</button>
         <span id="offboardSaveMsg" style="font-size:13px;color:#22c55e"></span>
       </div>`;
+
+    // Auto-fetch FedEx status if tracking numbers are already saved
+    if (rec.outbound_tracking) trackFedEx('outboundTracking', 'outboundStatus');
+    if (rec.return_tracking)   trackFedEx('returnTracking',   'returnStatus');
   }
 
   function closeOffboardModal() {
@@ -3008,10 +3012,13 @@ HTML = """<!DOCTYPE html>
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({email, device_id: deviceId, device_received: received})
     });
-    // Refresh the checkbox label
-    const span = document.querySelector(`#recv_${deviceId}`)?.closest('div[style*="1e293b"]')?.querySelector('span:last-child');
-    if (span) span.textContent = received ? 'Received ✓' : 'Not received';
-    if (span) span.style.color = received ? '#22c55e' : '#f87171';
+    // Refresh the badge
+    const badge = document.getElementById(`recvBadge_${deviceId}`);
+    if (badge) {
+      badge.textContent = received ? '✓ Received' : '⏳ Pending';
+      badge.style.background = received ? '#14532d' : '#431a1a';
+      badge.style.color = received ? '#86efac' : '#fca5a5';
+    }
   }
 
   async function saveOffboardNotes(email) {
