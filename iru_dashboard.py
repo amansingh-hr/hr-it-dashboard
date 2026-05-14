@@ -2273,6 +2273,7 @@ HTML = """<!DOCTYPE html>
                 ${sourceBadge(d.source)}
                 <span class="${ciClass}">Last seen: ${fmtRelative(d.last_check_in)}</span>
                 <span style="color:#64748b">Enrolled: ${fmtDate(d.first_enrollment)}</span>
+                ${kandjiLink(d)}
               </div>
             </div>
             <div style="color:#475569;font-size:12px;flex-shrink:0">›</div>
