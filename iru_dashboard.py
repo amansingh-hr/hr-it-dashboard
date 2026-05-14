@@ -212,6 +212,78 @@ def _sheets_sync_bg(email, rec, cfg):
     threading.Thread(target=_sheets_sync, args=(email, rec), daemon=True).start()
 
 
+def _sheets_restore(cfg):
+    """On startup: if offboarding.json is missing or empty, restore from Google Sheet."""
+    if os.path.exists(OFFBOARDING_FILE):
+        try:
+            with open(OFFBOARDING_FILE) as f:
+                existing = json.load(f)
+            if existing:
+                return  # already have local data
+        except Exception:
+            pass
+
+    sa_json  = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or cfg.get("google_service_account_json", "")
+    sheet_id = os.environ.get("GOOGLE_SHEET_ID")             or cfg.get("google_sheet_id", "")
+    if not sa_json or not sheet_id:
+        return
+
+    try:
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+
+        creds   = Credentials.from_service_account_info(
+            json.loads(sa_json),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
+        service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+        rows    = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range="A:J"
+        ).execute().get("values", [])
+
+        if len(rows) < 2:
+            return  # no data rows
+
+        def frombool(v): return v == "Yes"
+
+        data = {}
+        for row in rows[1:]:  # skip header
+            if not row:
+                continue
+            email = (row[0] if len(row) > 0 else "").strip().lower()
+            if not email:
+                continue
+            rec = {
+                "slack_deactivated":  frombool(row[1] if len(row) > 1 else ""),
+                "google_deactivated": frombool(row[2] if len(row) > 2 else ""),
+                "box_shipped":        frombool(row[3] if len(row) > 3 else ""),
+                "outbound_tracking":  row[4] if len(row) > 4 else "",
+                "equipment_returned": frombool(row[5] if len(row) > 5 else ""),
+                "return_tracking":    row[6] if len(row) > 6 else "",
+                "notes":              row[7] if len(row) > 7 else "",
+                "devices":            {},
+                "restored_from_sheet": True,
+            }
+            # Parse devices string: "device_id: received/pending; ..."
+            devices_str = row[8] if len(row) > 8 else ""
+            for part in devices_str.split(";"):
+                part = part.strip()
+                if ":" in part:
+                    did, status = part.split(":", 1)
+                    did = did.strip()
+                    received = status.strip() == "received"
+                    if did:
+                        rec["devices"][did] = {"received": received, "received_at": None}
+            data[email] = rec
+
+        if data:
+            _save_offboarding(data)
+            print(f"[Sheets] Restored {len(data)} offboarding record(s) from Google Sheet.", flush=True)
+
+    except Exception as exc:
+        print(f"[Sheets restore error] {exc}", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # FedEx Tracking API
 # ---------------------------------------------------------------------------
@@ -3829,6 +3901,7 @@ def main():
         print(f"✅ Cloud mode — config from environment variables")
         if not DASHBOARD_PASS:
             print("⚠️  WARNING: DASHBOARD_PASS is not set. Login will be disabled.")
+        _sheets_restore(cfg)  # restore offboarding data from Sheet if local file is missing
     else:
         # Local mode: load from JSON or run first-time setup
         cfg = load_config()
