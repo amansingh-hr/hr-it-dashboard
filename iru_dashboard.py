@@ -213,16 +213,7 @@ def _sheets_sync_bg(email, rec, cfg):
 
 
 def _sheets_restore(cfg):
-    """On startup: if offboarding.json is missing or empty, restore from Google Sheet."""
-    if os.path.exists(OFFBOARDING_FILE):
-        try:
-            with open(OFFBOARDING_FILE) as f:
-                existing = json.load(f)
-            if existing:
-                return  # already have local data
-        except Exception:
-            pass
-
+    """On startup: always restore offboarding data from Google Sheet (Sheet is source of truth in cloud mode)."""
     sa_json  = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or cfg.get("google_service_account_json", "")
     sheet_id = os.environ.get("GOOGLE_SHEET_ID")             or cfg.get("google_sheet_id", "")
     if not sa_json or not sheet_id:
