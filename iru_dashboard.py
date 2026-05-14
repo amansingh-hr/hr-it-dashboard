@@ -3209,8 +3209,8 @@ HTML = """<!DOCTYPE html>
         style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:10px;color:#f1f5f9;font-size:13px;resize:vertical"
       >${esc(rec?.notes || '')}</textarea>
       <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
-        <button class="btn" onclick="saveOffboardNotes('${email}')"
-          style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px">Save Notes</button>
+        <button class="btn" onclick="saveOffboardAll('${email}')"
+          style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px">Save</button>
         <span id="offboardSaveMsg" style="font-size:13px;color:#22c55e"></span>
       </div>`;
 
@@ -3237,25 +3237,31 @@ HTML = """<!DOCTYPE html>
     }
   }
 
-  async function saveOffboardNotes(email) {
-    const notes = document.getElementById('offboardNotes').value;
+  async function saveOffboardAll(email) {
     const btn = document.querySelector('#offboardContent .btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
     try {
+      // Collect all current field values in one payload
+      const payload = {
+        email,
+        notes:             (document.getElementById('offboardNotes')    || {}).value || '',
+        outbound_tracking: (document.getElementById('outboundTracking') || {}).value?.trim() || '',
+        return_tracking:   (document.getElementById('returnTracking')   || {}).value?.trim() || '',
+      };
       const res  = await fetch('/api/offboarding/update', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({email, notes})
+        body: JSON.stringify(payload)
       });
       const data = await res.json();
       if (data.ok) {
         if (btn) { btn.textContent = '✓ Saved'; btn.style.background = '#22c55e'; }
         setTimeout(() => closeOffboardModal(), 800);
       } else {
-        if (btn) { btn.disabled = false; btn.textContent = 'Save Notes'; }
-        alert(data.error || 'Error saving notes.');
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; btn.style.background = ''; }
+        alert(data.error || 'Error saving.');
       }
     } catch(e) {
-      if (btn) { btn.disabled = false; btn.textContent = 'Save Notes'; }
+      if (btn) { btn.disabled = false; btn.textContent = 'Save'; btn.style.background = ''; }
       alert('Network error: ' + e.message);
     }
   }
