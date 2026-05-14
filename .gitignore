@@ -1,0 +1,15 @@
+# Secrets — never commit these
+iru_config.json
+iru_cache.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS app bundle (local only)
+Iru Dashboard.app/
+AppIcon.iconset/
+*.icns
+create_app.sh
+Start Iru Dashboard.command

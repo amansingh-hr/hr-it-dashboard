@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: iru-dashboard
+    runtime: python
+    buildCommand: echo "No build needed"
+    startCommand: python iru_dashboard.py
+    envVars:
+      - key: IRU_SUBDOMAIN
+        sync: false          # set manually in Render dashboard
+      - key: IRU_TOKEN
+        sync: false
+      - key: IRU_REGION
+        value: us
+      - key: OKTA_DOMAIN
+        sync: false
+      - key: OKTA_TOKEN
+        sync: false
+      - key: JUMPCLOUD_API_KEY
+        sync: false
+      - key: DASHBOARD_USER
+        value: admin
+      - key: DASHBOARD_PASS
+        sync: false          # set a strong password here
