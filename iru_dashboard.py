@@ -32,8 +32,9 @@ from threading import Timer
 # ---------------------------------------------------------------------------
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iru_config.json")
 CACHE_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iru_cache.json")
-USERS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_users.json")
-PORT        = int(os.environ.get("PORT", 8080))
+USERS_FILE        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_users.json")
+OFFBOARDING_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "offboarding.json")
+PORT              = int(os.environ.get("PORT", 8080))
 CACHE_TTL   = 15 * 60   # used for staleness checks; auto-refresh is disabled (refresh on login instead)
 
 # Cloud deployment: load API credentials from environment variables
@@ -98,6 +99,29 @@ def _save_users(users):
     with _users_lock:
         with open(USERS_FILE, 'w') as f:
             json.dump(users, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Offboarding records
+# ---------------------------------------------------------------------------
+_offboarding_lock = threading.Lock()
+
+
+def _load_offboarding():
+    with _offboarding_lock:
+        if os.path.exists(OFFBOARDING_FILE):
+            try:
+                with open(OFFBOARDING_FILE) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+
+def _save_offboarding(data):
+    with _offboarding_lock:
+        with open(OFFBOARDING_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
 
 
 def _get_dashboard_creds():
@@ -1369,6 +1393,7 @@ HTML = """<!DOCTYPE html>
           <th>Term Date</th>
           <th>Last Check-in</th>
           <th>Enrolled</th>
+          <th>Actions</th>
         </tr></thead>
         <tbody id="orphanedBody"></tbody>
       </table>
@@ -1504,6 +1529,20 @@ HTML = """<!DOCTYPE html>
 
   function esc(s) {
     return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function kandjiUrl(d) {
+    if (!d || d.source !== 'iru' || !d.device_id) return null;
+    const sub = window.iruSubdomain || 'hungryroot';
+    return `https://${sub}.kandji.io/devices/${d.device_id}`;
+  }
+
+  function kandjiLink(d) {
+    const url = kandjiUrl(d);
+    if (!url) return '';
+    return `<a href="${url}" target="_blank" title="Open in Kandji"
+      style="color:#64748b;font-size:11px;margin-left:5px;text-decoration:none;opacity:0.7"
+      onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.7">↗ Kandji</a>`;
   }
 
   // ── State ─────────────────────────────────────────────────────────────────
@@ -1687,11 +1726,16 @@ HTML = """<!DOCTYPE html>
 
     try {
       // Fetch Iru devices + Okta users + JumpCloud devices in parallel (all served from cache)
-      const [iruResp, oktaBulkResp, jcResp] = await Promise.all([
+      const [iruResp, oktaBulkResp, jcResp, metaResp] = await Promise.all([
         fetch('/api/devices'),
         fetch('/api/okta-users').catch(() => null),
         fetch('/api/jumpcloud-devices').catch(() => null),
+        fetch('/api/meta').catch(() => null),
       ]);
+      if (metaResp && metaResp.ok) {
+        const meta = await metaResp.json();
+        window.iruSubdomain = meta.subdomain || '';
+      }
       if (!iruResp.ok) throw new Error(await iruResp.text());
       const iruDevices = await iruResp.json();
 
@@ -1789,6 +1833,7 @@ HTML = """<!DOCTYPE html>
       return {
         _idx:             idx,
         _raw:             d,          // full raw object for details drawer
+        device_id:        d.device_id || d.id || '',
         device_name:      d.device_name || d.name || '—',
         model:            d.model || '—',
         device_family:    fam,
@@ -1955,7 +2000,10 @@ HTML = """<!DOCTYPE html>
       const oktaStatus = oktaUser ? oktaStatusBadge(oktaUser.status) : '<span style="color:#475569;font-size:12px">—</span>';
       return `
         <tr>
-          <td><button class="link-device" onclick="openDeviceDrawer(${d._idx})">${esc(d.device_name)}</button></td>
+          <td>
+            <button class="link-device" onclick="openDeviceDrawer(${d._idx})">${esc(d.device_name)}</button>
+            ${kandjiLink(d)}
+          </td>
           <td style="color:#94a3b8">${esc(d.model)}</td>
           <td><span class="badge ${badgeClass(d.device_family)}">${esc(d.device_family)}</span></td>
           <td>${sourceBadge(d.source)}</td>
@@ -2509,7 +2557,10 @@ HTML = """<!DOCTYPE html>
       const ou = oktaUserMap[d.user_email.toLowerCase()];
       const ciClass = checkInClass(d.last_check_in);
       return `<tr>
-        <td><button class="link-device" onclick="openDeviceDrawer(${d._idx})">${esc(d.device_name)}</button></td>
+        <td>
+          <button class="link-device" onclick="openDeviceDrawer(${d._idx})">${esc(d.device_name)}</button>
+          ${kandjiLink(d)}
+        </td>
         <td style="color:#94a3b8">${esc(d.model)}</td>
         <td><span class="badge ${badgeClass(d.device_family)}">${esc(d.device_family)}</span></td>
         <td><button class="link-name" onclick="goToUser('${d.user_email}')">${esc(d.user_name || d.user_email)}</button></td>
@@ -2518,6 +2569,8 @@ HTML = """<!DOCTYPE html>
         <td style="color:#f87171">${fmtDate(ou?.profile?.terminationDate || ou?.statusChanged)}</td>
         <td class="${ciClass}">${fmtRelative(d.last_check_in)}</td>
         <td style="color:#94a3b8">${fmtDate(d.first_enrollment)}</td>
+        <td><button class="btn btn-secondary" style="font-size:12px;padding:4px 10px;white-space:nowrap"
+          onclick="openOffboardModal('${d.user_email}')">📋 Checklist</button></td>
       </tr>`;
     }).join('');
   }
@@ -2750,6 +2803,107 @@ HTML = """<!DOCTYPE html>
     document.getElementById('pieModalOverlay').classList.remove('open');
   }
 
+  // ── Offboarding Checklist ─────────────────────────────────────────────────
+  async function openOffboardModal(email) {
+    const modal = document.getElementById('offboardModal');
+    const content = document.getElementById('offboardContent');
+    modal.style.display = 'flex';
+    content.innerHTML = '<div style="color:#64748b;padding:20px">Loading...</div>';
+
+    const ou = oktaUserMap[email.toLowerCase()];
+    const userDevices = allDevicesFlat.filter(d => d.user_email === email.toLowerCase());
+    const rec = await fetch(`/api/offboarding?email=${encodeURIComponent(email)}`).then(r => r.json()).catch(() => ({}));
+
+    const name = ou ? `${ou.profile?.firstName || ''} ${ou.profile?.lastName || ''}`.trim() : email;
+    const oktaStatus = ou?.status || 'UNKNOWN';
+    const oktaOk = oktaStatus === 'DEPROVISIONED';
+    const termDate = ou?.profile?.terminationDate || ou?.statusChanged || null;
+
+    content.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px">
+        <div>
+          <div style="font-size:18px;font-weight:600">${esc(name)}</div>
+          <div style="color:#64748b;font-size:13px">${esc(email)}</div>
+          ${termDate ? `<div style="color:#94a3b8;font-size:12px;margin-top:2px">Term date: ${fmtDate(termDate)}</div>` : ''}
+        </div>
+        <button onclick="closeOffboardModal()" style="background:none;border:none;color:#64748b;font-size:20px;cursor:pointer;padding:0">✕</button>
+      </div>
+
+      <div style="font-size:13px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">Offboarding Checklist</div>
+
+      <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:24px">
+        <div style="display:flex;align-items:center;gap:10px;padding:12px;background:${oktaOk ? '#14532d' : '#431a1a'};border-radius:8px">
+          <span style="font-size:18px">${oktaOk ? '✅' : '⚠️'}</span>
+          <div>
+            <div style="font-size:13px;font-weight:500">Okta deprovisioned</div>
+            <div style="font-size:12px;color:#94a3b8">Status: ${oktaStatus}</div>
+          </div>
+        </div>
+
+        ${userDevices.length === 0 ? `
+        <div style="display:flex;align-items:center;gap:10px;padding:12px;background:#14532d;border-radius:8px">
+          <span style="font-size:18px">✅</span>
+          <div style="font-size:13px;font-weight:500">No devices in MDM</div>
+        </div>` : userDevices.map(d => {
+          const devRec = rec?.devices?.[d.device_id] || {};
+          const received = devRec.received || false;
+          return `
+          <div style="padding:12px;background:#1e293b;border-radius:8px">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+              <input type="checkbox" id="recv_${d.device_id}" ${received ? 'checked' : ''}
+                onchange="saveDeviceReceived('${email}','${d.device_id}',this.checked)"
+                style="width:16px;height:16px;cursor:pointer;accent-color:#22c55e">
+              <div style="flex:1">
+                <div style="font-size:13px;font-weight:500">${esc(d.device_name)} ${kandjiLink(d)}</div>
+                <div style="font-size:12px;color:#94a3b8">${esc(d.model)} · ${esc(d.device_family)} · S/N: ${esc(d.serial_number||'—')}</div>
+              </div>
+              <span style="font-size:12px;color:${received ? '#22c55e' : '#f87171'}">${received ? 'Received ✓' : 'Not received'}</span>
+            </div>
+            ${received && devRec.received_at ? `<div style="font-size:11px;color:#64748b;padding-left:26px">Received: ${devRec.received_at.slice(0,10)}</div>` : ''}
+          </div>`;
+        }).join('')}
+      </div>
+
+      <div style="margin-bottom:16px">
+        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px">Notes</label>
+        <textarea id="offboardNotes" rows="3" placeholder="e.g. Shipped back via FedEx, awaiting confirmation..."
+          style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:10px;color:#f1f5f9;font-size:13px;resize:vertical"
+        >${esc(rec?.notes || '')}</textarea>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <button class="btn" onclick="saveOffboardNotes('${email}')"
+          style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px">Save Notes</button>
+        <span id="offboardSaveMsg" style="font-size:13px;color:#22c55e"></span>
+      </div>`;
+  }
+
+  function closeOffboardModal() {
+    document.getElementById('offboardModal').style.display = 'none';
+  }
+
+  async function saveDeviceReceived(email, deviceId, received) {
+    await fetch('/api/offboarding/update', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({email, device_id: deviceId, device_received: received})
+    });
+    // Refresh the checkbox label
+    const span = document.querySelector(`#recv_${deviceId}`)?.closest('div[style*="1e293b"]')?.querySelector('span:last-child');
+    if (span) span.textContent = received ? 'Received ✓' : 'Not received';
+    if (span) span.style.color = received ? '#22c55e' : '#f87171';
+  }
+
+  async function saveOffboardNotes(email) {
+    const notes = document.getElementById('offboardNotes').value;
+    const res = await fetch('/api/offboarding/update', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({email, notes})
+    });
+    const data = await res.json();
+    const msg = document.getElementById('offboardSaveMsg');
+    if (data.ok) { msg.textContent = 'Saved ✓'; setTimeout(() => msg.textContent='', 2000); }
+    else { msg.style.color='#f87171'; msg.textContent = data.error || 'Error saving'; }
+  }
+
   // Boot
   fetchAll();
   startCachePolling();
@@ -2828,6 +2982,13 @@ HTML = """<!DOCTYPE html>
     else { alert(data.error || 'Error updating password.'); }
   }
 </script>
+
+<!-- ── Offboarding Checklist Modal ── -->
+<div id="offboardModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#1e293b;border-radius:12px;padding:28px;width:100%;max-width:580px;max-height:85vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.5)">
+    <div id="offboardContent"></div>
+  </div>
+</div>
 
 <!-- ── Admin Tab Panel ── -->
 <div class="tab-panel" id="tab-admin" style="display:none;padding:32px 24px;max-width:800px;margin:0 auto">
@@ -3044,6 +3205,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._text_error(500, str(e))
 
+        elif self.path == "/api/meta":
+            cfg = DashboardHandler.config
+            self._json_response({
+                "subdomain": cfg.get("subdomain", "") if cfg else "",
+                "region":    cfg.get("region", "us") if cfg else "us",
+            })
+
+        elif self.path.startswith("/api/offboarding"):
+            from urllib.parse import urlparse, parse_qs
+            qs  = parse_qs(urlparse(self.path).query)
+            email = qs.get("email", [""])[0].lower().strip()
+            data = _load_offboarding()
+            self._json_response(data.get(email, {}))
+
         elif self.path == "/api/admin/users":
             token = self._get_cookie("session")
             me = _get_session_username(token)
@@ -3127,6 +3302,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 print("\n🛑 Server stopped via dashboard button.")
                 os._exit(0)
             Timer(0.1, _do_stop).start()
+
+        elif self.path == "/api/offboarding/update":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            email  = body.get("email", "").lower().strip()
+            if not email:
+                self._json_response({"ok": False, "error": "email required"})
+                return
+            data = _load_offboarding()
+            if email not in data:
+                data[email] = {
+                    "initiated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "notes": "", "devices": {}
+                }
+            if "notes" in body:
+                data[email]["notes"] = body["notes"]
+            if "device_received" in body:
+                dev_id = body.get("device_id", "")
+                if dev_id:
+                    if "devices" not in data[email]:
+                        data[email]["devices"] = {}
+                    data[email]["devices"][dev_id] = {
+                        "received":    body["device_received"],
+                        "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                                       if body["device_received"] else None,
+                    }
+            _save_offboarding(data)
+            self._json_response({"ok": True})
 
         elif self.path == "/api/admin/users/add":
             length = int(self.headers.get("Content-Length", 0))
