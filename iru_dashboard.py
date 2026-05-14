@@ -50,8 +50,10 @@ def _config_from_env():
             "okta_domain":         os.environ.get("OKTA_DOMAIN", ""),
             "okta_token":          os.environ.get("OKTA_TOKEN", ""),
             "jumpcloud_api_key":   os.environ.get("JUMPCLOUD_API_KEY", ""),
-            "fedex_client_id":     os.environ.get("FEDEX_CLIENT_ID", ""),
-            "fedex_client_secret": os.environ.get("FEDEX_CLIENT_SECRET", ""),
+            "fedex_client_id":              os.environ.get("FEDEX_CLIENT_ID", ""),
+            "fedex_client_secret":           os.environ.get("FEDEX_CLIENT_SECRET", ""),
+            "google_sheet_id":              os.environ.get("GOOGLE_SHEET_ID", ""),
+            "google_service_account_json":  os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
         }
     return None
 
@@ -124,6 +126,90 @@ def _save_offboarding(data):
     with _offboarding_lock:
         with open(OFFBOARDING_FILE, 'w') as f:
             json.dump(data, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Google Sheets sync
+# ---------------------------------------------------------------------------
+_SHEETS_HEADERS = [
+    "Email", "Slack Deactivated", "Google Deactivated", "Box Shipped",
+    "Outbound Tracking", "Equipment Returned", "Return Tracking",
+    "Notes", "Devices", "Last Updated",
+]
+
+def _sheets_sync(email, rec):
+    """Upsert one offboarding record into the configured Google Sheet."""
+    try:
+        cfg      = getattr(_sheets_sync, "_cfg", None) or {}
+        sa_json  = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or cfg.get("google_service_account_json", "")
+        sheet_id = os.environ.get("GOOGLE_SHEET_ID")             or cfg.get("google_sheet_id", "")
+        if not sa_json or not sheet_id:
+            return
+
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+
+        creds   = Credentials.from_service_account_info(
+            json.loads(sa_json),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
+        service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+        api     = service.spreadsheets().values()
+
+        def yn(v): return "Yes" if v else "No"
+
+        devices_str = "; ".join(
+            f"{did}: {'received' if dv.get('received') else 'pending'}"
+            for did, dv in (rec.get("devices") or {}).items()
+        )
+        row = [
+            email,
+            yn(rec.get("slack_deactivated")),
+            yn(rec.get("google_deactivated")),
+            yn(rec.get("box_shipped")),
+            rec.get("outbound_tracking") or "",
+            yn(rec.get("equipment_returned")),
+            rec.get("return_tracking") or "",
+            rec.get("notes") or "",
+            devices_str,
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        ]
+
+        # Read column A to find existing row (or detect empty sheet)
+        existing = api.get(spreadsheetId=sheet_id, range="A:A").execute().get("values", [])
+
+        # Ensure header row exists
+        if not existing or existing[0][0] != "Email":
+            api.update(
+                spreadsheetId=sheet_id, range="A1",
+                valueInputOption="RAW",
+                body={"values": [_SHEETS_HEADERS]},
+            ).execute()
+            existing = [_SHEETS_HEADERS]
+
+        # Find existing row for this email
+        row_idx = next((i + 1 for i, r in enumerate(existing) if r and r[0] == email), None)
+
+        if row_idx:
+            api.update(
+                spreadsheetId=sheet_id, range=f"A{row_idx}",
+                valueInputOption="RAW", body={"values": [row]},
+            ).execute()
+        else:
+            api.append(
+                spreadsheetId=sheet_id, range="A:A",
+                valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+                body={"values": [row]},
+            ).execute()
+
+    except Exception as exc:
+        print(f"[Sheets sync error] {exc}", flush=True)
+
+
+def _sheets_sync_bg(email, rec, cfg):
+    """Fire-and-forget wrapper — runs _sheets_sync on a daemon thread."""
+    _sheets_sync._cfg = cfg
+    threading.Thread(target=_sheets_sync, args=(email, rec), daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -3606,6 +3692,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                        if body["device_received"] else None,
                     }
             _save_offboarding(data)
+            _sheets_sync_bg(email, data[email], DashboardHandler.config or {})
             self._json_response({"ok": True})
 
         elif self.path == "/api/admin/users/add":
