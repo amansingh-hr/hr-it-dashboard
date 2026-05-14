@@ -44,12 +44,14 @@ def _config_from_env():
     tok = os.environ.get("IRU_TOKEN", "")
     if sub and tok:
         return {
-            "subdomain":         sub,
-            "token":             tok,
-            "region":            os.environ.get("IRU_REGION", "us"),
-            "okta_domain":       os.environ.get("OKTA_DOMAIN", ""),
-            "okta_token":        os.environ.get("OKTA_TOKEN", ""),
-            "jumpcloud_api_key": os.environ.get("JUMPCLOUD_API_KEY", ""),
+            "subdomain":           sub,
+            "token":               tok,
+            "region":              os.environ.get("IRU_REGION", "us"),
+            "okta_domain":         os.environ.get("OKTA_DOMAIN", ""),
+            "okta_token":          os.environ.get("OKTA_TOKEN", ""),
+            "jumpcloud_api_key":   os.environ.get("JUMPCLOUD_API_KEY", ""),
+            "fedex_client_id":     os.environ.get("FEDEX_CLIENT_ID", ""),
+            "fedex_client_secret": os.environ.get("FEDEX_CLIENT_SECRET", ""),
         }
     return None
 
@@ -122,6 +124,53 @@ def _save_offboarding(data):
     with _offboarding_lock:
         with open(OFFBOARDING_FILE, 'w') as f:
             json.dump(data, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# FedEx Tracking API
+# ---------------------------------------------------------------------------
+_fedex_token_cache = {"token": None, "expires": 0}
+_fedex_token_lock  = threading.Lock()
+
+
+def _get_fedex_token(client_id, client_secret):
+    with _fedex_token_lock:
+        if _fedex_token_cache["token"] and time.time() < _fedex_token_cache["expires"] - 60:
+            return _fedex_token_cache["token"]
+        data = urllib.parse.urlencode({
+            "grant_type":    "client_credentials",
+            "client_id":     client_id,
+            "client_secret": client_secret,
+        }).encode()
+        req = urllib.request.Request(
+            "https://apis.fedex.com/oauth/token",
+            data=data, method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+        _fedex_token_cache["token"]   = result["access_token"]
+        _fedex_token_cache["expires"] = time.time() + result.get("expires_in", 3600)
+        return _fedex_token_cache["token"]
+
+
+def _track_fedex(tracking_number, client_id, client_secret):
+    token   = _get_fedex_token(client_id, client_secret)
+    payload = json.dumps({
+        "includeDetailedScans": False,
+        "trackingInfo": [{"trackingNumberInfo": {"trackingNumber": tracking_number}}],
+    }).encode()
+    req = urllib.request.Request(
+        "https://apis.fedex.com/track/v1/trackingnumbers",
+        data=payload, method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json",
+            "x-locale":      "en_US",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())
 
 
 def _get_dashboard_creds():
@@ -309,18 +358,19 @@ def load_config():
 
 
 def save_config(subdomain, token, region="us", okta_domain="", okta_token="", jumpcloud_api_key="",
-                dashboard_user="", dashboard_pass=""):
-    # Preserve existing dashboard_user/pass if not explicitly changing them
+                dashboard_user="", dashboard_pass="", fedex_client_id="", fedex_client_secret=""):
     existing = load_config() or {}
     cfg = {
-        "subdomain":         subdomain.strip(),
-        "token":             token.strip(),
-        "region":            region.strip() or "us",
-        "okta_domain":       okta_domain.strip(),
-        "okta_token":        okta_token.strip(),
-        "jumpcloud_api_key": jumpcloud_api_key.strip(),
-        "dashboard_user":    dashboard_user.strip() or existing.get("dashboard_user", "admin"),
-        "dashboard_pass":    dashboard_pass.strip() or existing.get("dashboard_pass", ""),
+        "subdomain":           subdomain.strip(),
+        "token":               token.strip(),
+        "region":              region.strip() or "us",
+        "okta_domain":         okta_domain.strip(),
+        "okta_token":          okta_token.strip(),
+        "jumpcloud_api_key":   jumpcloud_api_key.strip(),
+        "dashboard_user":      dashboard_user.strip() or existing.get("dashboard_user", "admin"),
+        "dashboard_pass":      dashboard_pass.strip() or existing.get("dashboard_pass", ""),
+        "fedex_client_id":     fedex_client_id.strip() or existing.get("fedex_client_id", ""),
+        "fedex_client_secret": fedex_client_secret.strip() or existing.get("fedex_client_secret", ""),
     }
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
@@ -1120,6 +1170,20 @@ HTML = """<!DOCTYPE html>
   </div>
 
   <div class="settings-section">
+    <div class="settings-section-label">FedEx Tracking</div>
+    <div class="form-row" style="grid-template-columns:1fr 1fr">
+      <div class="form-group">
+        <label>Client ID</label>
+        <input type="password" id="fedexClientId" placeholder="FedEx Developer Portal → App → Client ID">
+      </div>
+      <div class="form-group">
+        <label>Client Secret</label>
+        <input type="password" id="fedexSecret" placeholder="FedEx Developer Portal → App → Client Secret">
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-section">
     <div class="settings-section-label">Dashboard Login</div>
     <div class="form-row" style="grid-template-columns:1fr 1fr auto">
       <div class="form-group">
@@ -1582,14 +1646,17 @@ HTML = """<!DOCTYPE html>
     const oktaDomain = document.getElementById('oktaDomain').value.trim();
     const oktaToken  = document.getElementById('oktaToken').value.trim();
     const jcApiKey   = document.getElementById('jcApiKey').value.trim();
-    const dashUser   = document.getElementById('dashUser').value.trim();
-    const dashPass   = document.getElementById('dashPass').value.trim();
+    const dashUser      = document.getElementById('dashUser').value.trim();
+    const dashPass      = document.getElementById('dashPass').value.trim();
+    const fedexClientId = document.getElementById('fedexClientId').value.trim();
+    const fedexSecret   = document.getElementById('fedexSecret').value.trim();
     if (!subdomain || !token) { alert('Please enter Iru subdomain and token.'); return; }
     fetch('/api/save-config', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({subdomain, token, region, okta_domain: oktaDomain, okta_token: oktaToken,
-        jumpcloud_api_key: jcApiKey, dashboard_user: dashUser, dashboard_pass: dashPass})
+        jumpcloud_api_key: jcApiKey, dashboard_user: dashUser, dashboard_pass: dashPass,
+        fedex_client_id: fedexClientId, fedex_client_secret: fedexSecret})
     }).then(r => r.json()).then(d => {
       if (d.ok) { document.getElementById('configPanel').classList.remove('show'); fetchAll(); }
       else alert('Error saving: ' + d.error);
@@ -2812,23 +2879,38 @@ HTML = """<!DOCTYPE html>
   }
 
   // ── Offboarding Checklist ─────────────────────────────────────────────────
+  function obCheck(icon, label, checked, id, email, field) {
+    const bg = checked ? '#14532d' : '#1e293b';
+    const ic = checked ? '✅' : '⬜';
+    return `<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:${bg};border-radius:8px;cursor:pointer"
+      onclick="document.getElementById('${id}').click()">
+      <input type="checkbox" id="${id}" ${checked ? 'checked' : ''}
+        onchange="saveOffboardField('${email}','${field}',this.checked);this.closest('div').style.background=this.checked?'#14532d':'#1e293b'"
+        style="width:16px;height:16px;cursor:pointer;accent-color:#22c55e">
+      <span style="font-size:15px">${icon}</span>
+      <span style="font-size:13px;font-weight:500">${label}</span>
+    </div>`;
+  }
+
   async function openOffboardModal(email) {
-    const modal = document.getElementById('offboardModal');
+    const modal   = document.getElementById('offboardModal');
     const content = document.getElementById('offboardContent');
     modal.style.display = 'flex';
     content.innerHTML = '<div style="color:#64748b;padding:20px">Loading...</div>';
 
-    const ou = oktaUserMap[email.toLowerCase()];
+    const ou          = oktaUserMap[email.toLowerCase()];
     const userDevices = allDevicesFlat.filter(d => d.user_email === email.toLowerCase());
-    const rec = await fetch(`/api/offboarding?email=${encodeURIComponent(email)}`).then(r => r.json()).catch(() => ({}));
+    const rec         = await fetch(`/api/offboarding?email=${encodeURIComponent(email)}`).then(r => r.json()).catch(() => ({}));
 
-    const name = ou ? `${ou.profile?.firstName || ''} ${ou.profile?.lastName || ''}`.trim() : email;
+    const name       = ou ? `${ou.profile?.firstName || ''} ${ou.profile?.lastName || ''}`.trim() : email;
     const oktaStatus = ou?.status || 'UNKNOWN';
-    const oktaOk = oktaStatus === 'DEPROVISIONED';
-    const termDate = ou?.profile?.terminationDate || ou?.statusChanged || null;
+    const oktaOk     = oktaStatus === 'DEPROVISIONED';
+    const termDate   = ou?.profile?.terminationDate || ou?.statusChanged || null;
+
+    const sectionHead = label => `<div style="font-size:11px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.07em;margin:20px 0 8px">${label}</div>`;
 
     content.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
         <div>
           <div style="font-size:18px;font-weight:600">${esc(name)}</div>
           <div style="color:#64748b;font-size:13px">${esc(email)}</div>
@@ -2837,48 +2919,80 @@ HTML = """<!DOCTYPE html>
         <button onclick="closeOffboardModal()" style="background:none;border:none;color:#64748b;font-size:20px;cursor:pointer;padding:0">✕</button>
       </div>
 
-      <div style="font-size:13px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">Offboarding Checklist</div>
-
-      <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:24px">
-        <div style="display:flex;align-items:center;gap:10px;padding:12px;background:${oktaOk ? '#14532d' : '#431a1a'};border-radius:8px">
+      ${sectionHead('Account Deactivations')}
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:${oktaOk ? '#14532d' : '#431a1a'};border-radius:8px">
           <span style="font-size:18px">${oktaOk ? '✅' : '⚠️'}</span>
+          <span style="font-size:15px">🔑</span>
           <div>
             <div style="font-size:13px;font-weight:500">Okta deprovisioned</div>
-            <div style="font-size:12px;color:#94a3b8">Status: ${oktaStatus}</div>
+            <div style="font-size:11px;color:#94a3b8">Status: ${oktaStatus}</div>
           </div>
         </div>
-
-        ${userDevices.length === 0 ? `
-        <div style="display:flex;align-items:center;gap:10px;padding:12px;background:#14532d;border-radius:8px">
-          <span style="font-size:18px">✅</span>
-          <div style="font-size:13px;font-weight:500">No devices in MDM</div>
-        </div>` : userDevices.map(d => {
-          const devRec = rec?.devices?.[d.device_id] || {};
-          const received = devRec.received || false;
-          return `
-          <div style="padding:12px;background:#1e293b;border-radius:8px">
-            <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
-              <input type="checkbox" id="recv_${d.device_id}" ${received ? 'checked' : ''}
-                onchange="saveDeviceReceived('${email}','${d.device_id}',this.checked)"
-                style="width:16px;height:16px;cursor:pointer;accent-color:#22c55e">
-              <div style="flex:1">
-                <div style="font-size:13px;font-weight:500">${esc(d.device_name)} ${kandjiLink(d)}</div>
-                <div style="font-size:12px;color:#94a3b8">${esc(d.model)} · ${esc(d.device_family)} · S/N: ${esc(d.serial_number||'—')}</div>
-              </div>
-              <span style="font-size:12px;color:${received ? '#22c55e' : '#f87171'}">${received ? 'Received ✓' : 'Not received'}</span>
-            </div>
-            ${received && devRec.received_at ? `<div style="font-size:11px;color:#64748b;padding-left:26px">Received: ${devRec.received_at.slice(0,10)}</div>` : ''}
-          </div>`;
-        }).join('')}
+        ${obCheck('💬', 'Slack deactivated',           rec.slack_deactivated   || false, 'ob_slack',   email, 'slack_deactivated')}
+        ${obCheck('📧', 'Google Workspace deactivated', rec.google_deactivated  || false, 'ob_google',  email, 'google_deactivated')}
       </div>
 
-      <div style="margin-bottom:16px">
-        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px">Notes</label>
-        <textarea id="offboardNotes" rows="3" placeholder="e.g. Shipped back via FedEx, awaiting confirmation..."
-          style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:10px;color:#f1f5f9;font-size:13px;resize:vertical"
-        >${esc(rec?.notes || '')}</textarea>
+      ${sectionHead('Device Return')}
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${userDevices.length === 0
+          ? `<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:#14532d;border-radius:8px">
+               <span style="font-size:18px">✅</span><span style="font-size:13px">No devices enrolled in MDM</span></div>`
+          : userDevices.map(d => {
+              const devRec   = rec?.devices?.[d.device_id] || {};
+              const received = devRec.received || false;
+              return `<div style="padding:10px 12px;background:${received ? '#14532d' : '#1e293b'};border-radius:8px;cursor:pointer"
+                onclick="document.getElementById('recv_${d.device_id}').click()">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <input type="checkbox" id="recv_${d.device_id}" ${received ? 'checked' : ''}
+                    onchange="saveDeviceReceived('${email}','${d.device_id}',this.checked);this.closest('div[style]').style.background=this.checked?'#14532d':'#1e293b'"
+                    style="width:16px;height:16px;cursor:pointer;accent-color:#22c55e">
+                  <span style="font-size:15px">💻</span>
+                  <div style="flex:1">
+                    <div style="font-size:13px;font-weight:500">${esc(d.device_name)} ${kandjiLink(d)}</div>
+                    <div style="font-size:12px;color:#94a3b8">${esc(d.model)} · S/N: ${esc(d.serial_number||'—')}</div>
+                  </div>
+                  <span style="font-size:12px;color:${received ? '#22c55e' : '#f87171'}">${received ? 'Received ✓' : 'Pending'}</span>
+                </div>
+                ${received && devRec.received_at ? `<div style="font-size:11px;color:#64748b;margin-top:4px;padding-left:26px">Received: ${devRec.received_at.slice(0,10)}</div>` : ''}
+              </div>`;
+            }).join('')}
       </div>
-      <div style="display:flex;align-items:center;gap:10px">
+
+      ${sectionHead('Shipping')}
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="background:#1e293b;border-radius:8px;padding:12px">
+          ${obCheck('📦', 'Empty return box shipped to employee', rec.box_shipped || false, 'ob_box', email, 'box_shipped')}
+          <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+            <input type="text" id="outboundTracking" value="${esc(rec.outbound_tracking||'')}"
+              placeholder="Outbound FedEx tracking #"
+              onblur="saveOffboardField('${email}','outbound_tracking',this.value)"
+              style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:7px 10px;color:#f1f5f9;font-size:13px">
+            <button class="btn btn-secondary" style="font-size:12px;padding:6px 12px;white-space:nowrap"
+              onclick="trackFedEx('outboundTracking','outboundStatus')">Track</button>
+          </div>
+          <div id="outboundStatus" style="font-size:12px;color:#94a3b8;margin-top:6px;min-height:16px"></div>
+        </div>
+
+        <div style="background:#1e293b;border-radius:8px;padding:12px">
+          ${obCheck('📬', 'Equipment returned by employee', rec.equipment_returned || false, 'ob_return', email, 'equipment_returned')}
+          <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+            <input type="text" id="returnTracking" value="${esc(rec.return_tracking||'')}"
+              placeholder="Return FedEx tracking #"
+              onblur="saveOffboardField('${email}','return_tracking',this.value)"
+              style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:7px 10px;color:#f1f5f9;font-size:13px">
+            <button class="btn btn-secondary" style="font-size:12px;padding:6px 12px;white-space:nowrap"
+              onclick="trackFedEx('returnTracking','returnStatus')">Track</button>
+          </div>
+          <div id="returnStatus" style="font-size:12px;color:#94a3b8;margin-top:6px;min-height:16px"></div>
+        </div>
+      </div>
+
+      ${sectionHead('Notes')}
+      <textarea id="offboardNotes" rows="3" placeholder="e.g. Contacted employee on 5/10, device shipped via FedEx..."
+        style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:10px;color:#f1f5f9;font-size:13px;resize:vertical"
+      >${esc(rec?.notes || '')}</textarea>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
         <button class="btn" onclick="saveOffboardNotes('${email}')"
           style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px">Save Notes</button>
         <span id="offboardSaveMsg" style="font-size:13px;color:#22c55e"></span>
@@ -2920,6 +3034,39 @@ HTML = """<!DOCTYPE html>
     } catch(e) {
       if (btn) { btn.disabled = false; btn.textContent = 'Save Notes'; }
       alert('Network error: ' + e.message);
+    }
+  }
+
+  async function saveOffboardField(email, field, value) {
+    try {
+      await fetch('/api/offboarding/update', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({email, [field]: value})
+      });
+    } catch(e) {
+      console.warn('saveOffboardField error:', e);
+    }
+  }
+
+  async function trackFedEx(inputId, statusId) {
+    const tracking = document.getElementById(inputId).value.trim();
+    const statusEl = document.getElementById(statusId);
+    if (!tracking) { statusEl.textContent = 'Enter a tracking number first.'; return; }
+    statusEl.style.color = '#94a3b8';
+    statusEl.textContent = 'Looking up…';
+    try {
+      const res  = await fetch('/api/fedex-track?tracking=' + encodeURIComponent(tracking));
+      const data = await res.json();
+      if (data.ok) {
+        statusEl.style.color = '#22c55e';
+        statusEl.textContent = data.statusByLocale || data.status || 'Status unknown';
+      } else {
+        statusEl.style.color = '#f87171';
+        statusEl.textContent = data.error || 'Error fetching status';
+      }
+    } catch(e) {
+      statusEl.style.color = '#f87171';
+      statusEl.textContent = 'Network error: ' + e.message;
     }
   }
 
@@ -3231,6 +3378,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "region":    cfg.get("region", "us") if cfg else "us",
             })
 
+        elif self.path.startswith("/api/fedex-track"):
+            from urllib.parse import urlparse, parse_qs
+            qs       = parse_qs(urlparse(self.path).query)
+            tracking = qs.get("tracking", [""])[0].strip()
+            if not tracking:
+                self._json_response({"ok": False, "error": "tracking number required"})
+                return
+            cfg = DashboardHandler.config or {}
+            cid  = os.environ.get("FEDEX_CLIENT_ID",     cfg.get("fedex_client_id",     ""))
+            csec = os.environ.get("FEDEX_CLIENT_SECRET",  cfg.get("fedex_client_secret",  ""))
+            if not cid or not csec:
+                self._json_response({"ok": False, "error": "FedEx credentials not configured. Add FEDEX_CLIENT_ID and FEDEX_CLIENT_SECRET in Settings."})
+                return
+            try:
+                result = _track_fedex(tracking, cid, csec)
+                track_results = result.get("output", {}).get("completeTrackResults", [])
+                if not track_results:
+                    self._json_response({"ok": False, "error": "No results found for that tracking number."})
+                    return
+                info   = track_results[0].get("trackResults", [{}])[0]
+                status = info.get("latestStatusDetail", {})
+                self._json_response({
+                    "ok":             True,
+                    "status":         status.get("description", ""),
+                    "statusByLocale": status.get("statusByLocale", ""),
+                    "code":           status.get("code", ""),
+                })
+            except urllib.error.HTTPError as e:
+                body = e.read().decode(errors="replace")
+                self._json_response({"ok": False, "error": f"FedEx API error {e.code}: {body[:200]}"})
+            except Exception as e:
+                self._json_response({"ok": False, "error": str(e)})
+
         elif self.path.startswith("/api/offboarding"):
             from urllib.parse import urlparse, parse_qs
             qs  = parse_qs(urlparse(self.path).query)
@@ -3299,6 +3479,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     body.get("okta_domain", ""), body.get("okta_token", ""),
                     body.get("jumpcloud_api_key", ""),
                     body.get("dashboard_user", ""), body.get("dashboard_pass", ""),
+                    body.get("fedex_client_id", ""), body.get("fedex_client_secret", ""),
                 )
                 DashboardHandler.config = cfg
                 self._json_response({"ok": True})
@@ -3335,14 +3516,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "initiated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "notes": "", "devices": {}
                 }
-            if "notes" in body:
-                data[email]["notes"] = body["notes"]
+            rec = data[email]
+            # Simple boolean / string fields
+            for field in ("notes", "slack_deactivated", "google_deactivated",
+                          "box_shipped", "outbound_tracking", "return_tracking"):
+                if field in body:
+                    rec[field] = body[field]
+            # Per-device received flag
             if "device_received" in body:
                 dev_id = body.get("device_id", "")
                 if dev_id:
-                    if "devices" not in data[email]:
-                        data[email]["devices"] = {}
-                    data[email]["devices"][dev_id] = {
+                    rec.setdefault("devices", {})[dev_id] = {
                         "received":    body["device_received"],
                         "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                                        if body["device_received"] else None,
