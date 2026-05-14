@@ -1429,17 +1429,17 @@ HTML = """<!DOCTYPE html>
 
   <!-- ── Tab: Pending Returns ── -->
   <div class="tab-panel" id="tab-orphaned">
-    <div id="orphanedBanner" class="alert-banner" style="display:none">
-      <div class="alert-banner-icon">⚠️</div>
-      <div class="alert-banner-text">
-        <strong>Devices assigned to deprovisioned or suspended Okta users.</strong><br>
-        These may need to be wiped or reassigned.
+    <div id="orphanedBanner" style="display:none;align-items:center;gap:16px;background:linear-gradient(135deg,#1e1010,#2d1515);border:1px solid #7f1d1d;border-radius:10px;padding:14px 20px;margin-bottom:16px">
+      <span style="font-size:22px">🔄</span>
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:14px;color:#fca5a5">Pending Equipment Returns</div>
+        <div style="font-size:12px;color:#94a3b8;margin-top:2px">Offboarded employees with devices not yet returned</div>
       </div>
-      <div class="alert-banner-count" id="orphanedCount">—</div>
+      <div id="orphanedCount" style="font-size:22px;font-weight:700;color:#f87171">—</div>
     </div>
     <div id="orphanedEmpty" style="display:none;text-align:center;padding:60px;color:#64748b">
       <div style="font-size:40px;margin-bottom:12px">✅</div>
-      <div style="font-size:15px">No pending returns found — all assigned users are active in Okta.</div>
+      <div style="font-size:15px">No pending returns — all offboarded employees have returned their equipment.</div>
     </div>
     <div id="orphanedNoOkta" style="text-align:center;padding:60px;color:#64748b">
       <div style="font-size:40px;margin-bottom:12px">🔑</div>
@@ -1448,15 +1448,14 @@ HTML = """<!DOCTYPE html>
     <div class="table-wrap" id="orphanedTable" style="display:none;overflow-x:auto">
       <table>
         <thead><tr>
-          <th>Device Name</th>
-          <th>Model</th>
-          <th>Type</th>
-          <th>Assigned User</th>
-          <th>User Email</th>
-          <th>Okta Status</th>
+          <th>Employee</th>
+          <th>Device</th>
           <th>Term Date</th>
-          <th>Last Check-in</th>
-          <th>Enrolled</th>
+          <th style="text-align:center">Okta</th>
+          <th style="text-align:center">Slack</th>
+          <th style="text-align:center">Google</th>
+          <th>Outbound Box</th>
+          <th>Return Status</th>
           <th>Actions</th>
         </tr></thead>
         <tbody id="orphanedBody"></tbody>
@@ -2602,7 +2601,7 @@ HTML = """<!DOCTYPE html>
   }
 
   // ── Render: Pending Returns tab ─────────────────────────────────────────
-  function renderOrphaned() {
+  async function renderOrphaned() {
     const hasOkta = Object.keys(oktaUserMap).length > 0;
 
     document.getElementById('orphanedNoOkta').style.display  = hasOkta ? 'none' : 'block';
@@ -2624,28 +2623,96 @@ HTML = """<!DOCTYPE html>
       return;
     }
 
-    document.getElementById('orphanedBanner').style.display = 'flex';
-    document.getElementById('orphanedCount').textContent = orphaned.length + ' device' + (orphaned.length !== 1 ? 's' : '');
-    document.getElementById('orphanedTable').style.display = 'block';
+    // Group devices by user
+    const byUser = {};
+    orphaned.forEach(d => {
+      const email = d.user_email.toLowerCase();
+      if (!byUser[email]) byUser[email] = { ou: oktaUserMap[email], devices: [] };
+      byUser[email].devices.push(d);
+    });
 
-    document.getElementById('orphanedBody').innerHTML = orphaned.map(d => {
-      const ou = oktaUserMap[d.user_email.toLowerCase()];
-      const ciClass = checkInClass(d.last_check_in);
+    const emails = Object.keys(byUser);
+
+    // Count unique employees for banner
+    document.getElementById('orphanedBanner').style.display = 'flex';
+    document.getElementById('orphanedCount').textContent = emails.length + ' employee' + (emails.length !== 1 ? 's' : '');
+    document.getElementById('orphanedTable').style.display = 'block';
+    document.getElementById('orphanedBody').innerHTML = '<tr><td colspan="9" style="color:#64748b;padding:20px;text-align:center">Loading offboarding status…</td></tr>';
+
+    // Fetch all offboarding records in parallel
+    const records = await Promise.all(
+      emails.map(e => fetch('/api/offboarding?email=' + encodeURIComponent(e)).then(r => r.json()).catch(() => ({})))
+    );
+    const obMap = {};
+    emails.forEach((e, i) => obMap[e] = records[i] || {});
+
+    // Status pill helpers
+    function pill(done, doneLabel, undoneLabel, doneColors, undoneColors) {
+      const [bg, fg] = done ? doneColors : undoneColors;
+      return `<span style="display:inline-block;font-size:11px;font-weight:600;padding:3px 9px;border-radius:10px;background:${bg};color:${fg};white-space:nowrap">${done ? doneLabel : undoneLabel}</span>`;
+    }
+    const GREEN  = ['#14532d','#86efac'];
+    const ORANGE = ['#431a1a','#fca5a5'];
+    const AMBER  = ['#422006','#fcd34d'];
+
+    document.getElementById('orphanedBody').innerHTML = emails.map(email => {
+      const { ou, devices } = byUser[email];
+      const rec  = obMap[email] || {};
+      const name = ou ? `${ou.profile?.firstName || ''} ${ou.profile?.lastName || ''}`.trim() : email;
+      const termDate = ou?.profile?.terminationDate || ou?.statusChanged;
+
+      // Device cell — one line per device
+      const deviceCell = devices.map(d => {
+        const devRec  = rec?.devices?.[d.device_id] || {};
+        const received = devRec.received || false;
+        const badge = received
+          ? `<span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:8px;background:#14532d;color:#86efac">✓ Received</span>`
+          : `<span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:8px;background:#431a1a;color:#fca5a5">⏳ Pending</span>`;
+        return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <button class="link-device" style="font-size:12px" onclick="openDeviceDrawer(${d._idx})">${esc(d.device_name)}</button>
+          ${kandjiLink(d)}
+          ${badge}
+        </div>
+        <div style="font-size:11px;color:#64748b">${esc(d.model)} · S/N: ${esc(d.serial_number||'—')}</div>`;
+      }).join('<div style="margin:6px 0;border-top:1px solid #1e293b"></div>');
+
+      // Outbound box column
+      let outboundCell;
+      if (rec.outbound_tracking) {
+        outboundCell = `${pill(true,'📦 Shipped','',GREEN,AMBER)}
+          <div style="font-size:10px;color:#64748b;margin-top:3px;font-family:monospace">${esc(rec.outbound_tracking)}</div>`;
+      } else if (rec.box_shipped) {
+        outboundCell = pill(true,'📦 Shipped','',GREEN,AMBER);
+      } else {
+        outboundCell = pill(false,'','📭 Not Shipped',GREEN,ORANGE);
+      }
+
+      // Return status column
+      let returnCell;
+      const allReceived = devices.every(d => rec?.devices?.[d.device_id]?.received);
+      if (rec.equipment_returned || allReceived) {
+        returnCell = pill(true,'✓ Returned','',GREEN,AMBER);
+      } else if (rec.return_tracking) {
+        returnCell = `${pill(false,'','📬 In Transit',GREEN,AMBER)}
+          <div style="font-size:10px;color:#64748b;margin-top:3px;font-family:monospace">${esc(rec.return_tracking)}</div>`;
+      } else {
+        returnCell = pill(false,'','⏳ Awaiting',GREEN,ORANGE);
+      }
+
       return `<tr>
         <td>
-          <button class="link-device" onclick="openDeviceDrawer(${d._idx})">${esc(d.device_name)}</button>
-          ${kandjiLink(d)}
+          <div style="font-weight:500;font-size:13px">${esc(name)}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px">${esc(email)}</div>
         </td>
-        <td style="color:#94a3b8">${esc(d.model)}</td>
-        <td><span class="badge ${badgeClass(d.device_family)}">${esc(d.device_family)}</span></td>
-        <td><button class="link-name" onclick="goToUser('${d.user_email}')">${esc(d.user_name || d.user_email)}</button></td>
-        <td><button class="link-email" onclick="goToUser('${d.user_email}')">${esc(d.user_email)}</button></td>
-        <td>${oktaStatusBadge(ou?.status)}</td>
-        <td style="color:#f87171">${fmtDate(ou?.profile?.terminationDate || ou?.statusChanged)}</td>
-        <td class="${ciClass}">${fmtRelative(d.last_check_in)}</td>
-        <td style="color:#94a3b8">${fmtDate(d.first_enrollment)}</td>
-        <td><button class="btn btn-secondary" style="font-size:12px;padding:4px 10px;white-space:nowrap"
-          onclick="openOffboardModal('${d.user_email}')">📋 Checklist</button></td>
+        <td>${deviceCell}</td>
+        <td style="color:#f87171;font-size:13px;white-space:nowrap">${fmtDate(termDate)}</td>
+        <td style="text-align:center">${oktaStatusBadge(ou?.status)}</td>
+        <td style="text-align:center">${pill(rec.slack_deactivated,'✓','✗',GREEN,ORANGE)}</td>
+        <td style="text-align:center">${pill(rec.google_deactivated,'✓','✗',GREEN,ORANGE)}</td>
+        <td>${outboundCell}</td>
+        <td>${returnCell}</td>
+        <td><button class="btn btn-secondary" style="font-size:12px;padding:5px 12px;white-space:nowrap"
+          onclick="openOffboardModal('${email}')">📋 Checklist</button></td>
       </tr>`;
     }).join('');
   }
