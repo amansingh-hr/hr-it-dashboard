@@ -3240,7 +3240,7 @@ HTML = """<!DOCTYPE html>
       <!-- Two-column body -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;min-height:0">
 
-        <!-- LEFT: Accounts + Device Return -->
+        <!-- LEFT: Accounts + Shipping -->
         <div style="padding:20px 20px 20px 24px;border-right:1px solid #1e293b;display:flex;flex-direction:column;gap:8px">
           ${colHead('Accounts')}
           <!-- Okta read-only -->
@@ -3260,29 +3260,29 @@ HTML = """<!DOCTYPE html>
           ${obToggle('💬', 'Slack deactivated',            '', rec.slack_deactivated  || false, 'ob_slack',  email, 'slack_deactivated')}
           ${obToggle('📧', 'Google Workspace deactivated', '', rec.google_deactivated || false, 'ob_google', email, 'google_deactivated')}
 
-          <div style="margin-top:14px">${colHead('Device Return')}</div>
-          ${userDevices.length === 0
-            ? `<div style="display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid #166534;background:#052e16">
-                 <div style="width:22px;height:22px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center">
-                   <span style="color:#fff;font-size:11px;font-weight:700">✓</span></div>
-                 <span style="font-size:12px;color:#86efac">No devices enrolled</span></div>`
-            : userDevices.map(devRow).join('')}
-        </div>
-
-        <!-- RIGHT: Shipping + Notes -->
-        <div style="padding:20px 24px 20px 20px;display:flex;flex-direction:column;gap:8px">
-          ${colHead('Shipping')}
+          <div style="margin-top:14px">${colHead('Shipping')}</div>
           ${trackingCard('outboundTracking','outboundStatus',
             obToggle('📦','Empty return box shipped to employee','Outbound — box sent to employee for packing', rec.box_shipped||false,'ob_box',email,'box_shipped'),
             'FedEx outbound tracking #', rec.outbound_tracking, 'outbound_tracking')}
           ${trackingCard('returnTracking','returnStatus',
             obToggle('📬','Equipment returned by employee','Inbound — employee ships device back', rec.equipment_returned||false,'ob_return',email,'equipment_returned'),
             'FedEx return tracking #', rec.return_tracking, 'return_tracking')}
+        </div>
+
+        <!-- RIGHT: Device Return + Notes -->
+        <div style="padding:20px 24px 20px 20px;display:flex;flex-direction:column;gap:8px">
+          ${colHead('Device Return')}
+          ${userDevices.length === 0
+            ? `<div style="display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid #166534;background:#052e16">
+                 <div style="width:22px;height:22px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center">
+                   <span style="color:#fff;font-size:11px;font-weight:700">✓</span></div>
+                 <span style="font-size:12px;color:#86efac">No devices enrolled</span></div>`
+            : userDevices.map(devRow).join('')}
 
           <div style="margin-top:14px">${colHead('Notes')}</div>
-          <textarea id="offboardNotes" rows="4" placeholder="e.g. Contacted employee on 5/10, shipped via FedEx…"
+          <textarea id="offboardNotes" rows="5" placeholder="e.g. Contacted employee on 5/10, shipped via FedEx…"
             style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #1e293b;border-radius:10px;
-                   padding:10px 12px;color:#f1f5f9;font-size:12px;resize:vertical;outline:none;line-height:1.6;flex:1"
+                   padding:10px 12px;color:#f1f5f9;font-size:12px;resize:vertical;outline:none;line-height:1.6"
             onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='#1e293b'"
           >${esc(rec?.notes || '')}</textarea>
           <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:10px">
@@ -3367,7 +3367,9 @@ HTML = """<!DOCTYPE html>
       const data = await res.json();
       if (data.ok) {
         statusEl.style.color = '#22c55e';
-        statusEl.textContent = data.statusByLocale || data.status || 'Status unknown';
+        const label = data.statusByLocale || data.status || 'Status unknown';
+        const dateStr = data.deliveryDate ? ` · ${data.deliveryDate}` : '';
+        statusEl.textContent = label + dateStr;
       } else {
         statusEl.style.color = '#f87171';
         statusEl.textContent = data.error || 'Error fetching status';
@@ -3707,11 +3709,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 info   = track_results[0].get("trackResults", [{}])[0]
                 status = info.get("latestStatusDetail", {})
+                # Extract delivery date from dateAndTimes array
+                delivery_date = ""
+                for dt in info.get("dateAndTimes", []):
+                    if dt.get("type") in ("ACTUAL_DELIVERY", "ESTIMATED_DELIVERY"):
+                        raw = dt.get("dateTime", "")
+                        if raw:
+                            delivery_date = raw[:10]  # YYYY-MM-DD
+                            break
                 self._json_response({
                     "ok":             True,
                     "status":         status.get("description", ""),
                     "statusByLocale": status.get("statusByLocale", ""),
                     "code":           status.get("code", ""),
+                    "deliveryDate":   delivery_date,
                 })
             except urllib.error.HTTPError as e:
                 body = e.read().decode(errors="replace")
