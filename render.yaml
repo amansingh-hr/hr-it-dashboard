@@ -2,7 +2,7 @@ services:
   - type: web
     name: iru-dashboard
     runtime: python
-    buildCommand: echo "No build needed"
+    buildCommand: pip install -r requirements.txt
     startCommand: python iru_dashboard.py
     envVars:
       - key: IRU_SUBDOMAIN
