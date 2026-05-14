@@ -34,7 +34,7 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iru_conf
 CACHE_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iru_cache.json")
 USERS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_users.json")
 PORT        = int(os.environ.get("PORT", 8080))
-CACHE_TTL   = 15 * 60   # seconds between automatic background refreshes
+CACHE_TTL   = 15 * 60   # used for staleness checks; auto-refresh is disabled (refresh on login instead)
 
 # Cloud deployment: load API credentials from environment variables
 # Local development:  falls back to iru_config.json
@@ -269,12 +269,12 @@ def _refresh_all(cfg, force=False):
 
 
 def _background_refresh_loop():
-    """Daemon thread: refresh cache on TTL expiry or when signalled."""
+    """Daemon thread: only refreshes when explicitly signalled (e.g. on login or manual refresh)."""
     while True:
-        signalled = _refresh_flag.wait(timeout=CACHE_TTL)
+        _refresh_flag.wait()   # block indefinitely until signalled
         _refresh_flag.clear()
         cfg = DashboardHandler.config
-        _refresh_all(cfg, force=signalled)
+        _refresh_all(cfg, force=True)
 
 
 def load_config():
@@ -3069,6 +3069,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             password = params.get("password", "")
             if _check_credentials(username, password):
                 token = _create_session(username)
+                # Kick off a background refresh so the dashboard shows fresh data
+                _refresh_flag.set()
                 self._set_session_cookie(token)
             else:
                 self._redirect("/login?error=1")
