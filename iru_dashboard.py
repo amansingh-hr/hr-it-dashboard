@@ -1226,13 +1226,8 @@ HTML = """<!DOCTYPE html>
                 <div class="ms-trigger" onclick="msToggle('usersStatusFilter')" style="width:100%">
                   <span class="ms-label">All Statuses</span><span class="ms-arrow">▾</span>
                 </div>
-                <div class="ms-panel" style="min-width:180px">
-                  <label class="ms-option"><input type="checkbox" value="ACTIVE" onchange="msChanged('usersStatusFilter','All Statuses',filterUsers)"> Active</label>
-                  <label class="ms-option"><input type="checkbox" value="DEPROVISIONED" onchange="msChanged('usersStatusFilter','All Statuses',filterUsers)"> Deprovisioned</label>
-                  <label class="ms-option"><input type="checkbox" value="SUSPENDED" onchange="msChanged('usersStatusFilter','All Statuses',filterUsers)"> Suspended</label>
-                  <label class="ms-option"><input type="checkbox" value="LOCKED_OUT" onchange="msChanged('usersStatusFilter','All Statuses',filterUsers)"> Locked Out</label>
-                  <label class="ms-option"><input type="checkbox" value="PASSWORD_EXPIRED" onchange="msChanged('usersStatusFilter','All Statuses',filterUsers)"> Password Expired</label>
-                  <button class="ms-clear" onclick="msClear('usersStatusFilter','All Statuses',filterUsers)">Clear</button>
+                <div class="ms-panel" id="usersStatusPanel" style="min-width:180px">
+                  <button class="ms-clear" onclick="msClear(\'usersStatusFilter\',\'All Statuses\',filterUsers)">Clear</button>
                 </div>
               </div>
               <div class="ms-wrap" id="usersDeptFilter" style="flex:1">
@@ -2235,6 +2230,17 @@ HTML = """<!DOCTYPE html>
         devices:    devs,
       });
     });
+
+    // Populate status multi-select panel dynamically from actual data
+    const statusOrder = ['ACTIVE','STAGED','PROVISIONED','RECOVERY','PASSWORD_EXPIRED','LOCKED_OUT','SUSPENDED','DEPROVISIONED'];
+    const statusLabel = s => s.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
+    const statuses = [...new Set(allUsersFlat.map(u => u.status).filter(Boolean))].sort(
+      (a, b) => { const ai = statusOrder.indexOf(a), bi = statusOrder.indexOf(b); return (ai<0?99:ai) - (bi<0?99:bi); }
+    );
+    document.getElementById('usersStatusPanel').innerHTML =
+      statuses.map(s => `<label class="ms-option"><input type="checkbox" value="${s}"
+        onchange="msChanged('usersStatusFilter','All Statuses',filterUsers)"> ${statusLabel(s)}</label>`).join('') +
+      `<button class="ms-clear" onclick="msClear('usersStatusFilter','All Statuses',filterUsers)">Clear</button>`;
 
     // Populate department multi-select panel
     const depts = [...new Set(allUsersFlat.map(u => u.department).filter(Boolean))].sort();
