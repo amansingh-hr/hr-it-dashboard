@@ -1215,8 +1215,8 @@ HTML = """<!DOCTYPE html>
     <button class="tab active" onclick="switchTab('overview', this)">📊 Overview</button>
     <button class="tab" onclick="switchTab('devices', this)">🖥️ All Devices</button>
     <button class="tab" onclick="switchTab('users', this)">👥 Users</button>
-    <button class="tab" onclick="switchTab('orphaned', this)">🚨 Pending Returns</button>
     <button class="tab" onclick="switchTab('departments', this)">🏢 By Department</button>
+    <button class="tab" onclick="switchTab('orphaned', this)">🚨 Pending Returns</button>
     <button class="tab" onclick="switchTab('admin', this)" style="margin-left:auto">🔐 Admin</button>
   </div>
 
