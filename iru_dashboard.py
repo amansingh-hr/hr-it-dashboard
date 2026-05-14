@@ -1534,7 +1534,7 @@ HTML = """<!DOCTYPE html>
   function kandjiUrl(d) {
     if (!d || d.source !== 'iru' || !d.device_id) return null;
     const sub = window.iruSubdomain || 'hungryroot';
-    return `https://${sub}.kandji.io/devices/${d.device_id}`;
+    return `https://${sub}.iru.com/devices/${d.device_id}`;
   }
 
   function kandjiLink(d) {
