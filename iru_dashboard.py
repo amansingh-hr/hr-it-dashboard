@@ -1536,7 +1536,7 @@ HTML = """<!DOCTYPE html>
     if (d.source === 'iru' && d.device_id)
       return { url: `https://${window.iruSubdomain || 'hungryroot'}.iru.com/devices/${d.device_id}`, label: 'Iru' };
     if (d.source === 'jumpcloud' && d.jc_system_id)
-      return { url: `https://console.jumpcloud.com/ui/systems/${d.jc_system_id}/details`, label: 'JumpCloud' };
+      return { url: `https://console.jumpcloud.com/#/devices/${d.jc_system_id}/details/highlights`, label: 'JumpCloud' };
     return null;
   }
 
