@@ -1540,9 +1540,9 @@ HTML = """<!DOCTYPE html>
   function kandjiLink(d) {
     const url = kandjiUrl(d);
     if (!url) return '';
-    return `<a href="${url}" target="_blank" title="Open in Kandji"
+    return `<a href="${url}" target="_blank" title="Open in Iru"
       style="color:#64748b;font-size:11px;margin-left:5px;text-decoration:none;opacity:0.7"
-      onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.7">↗ Kandji</a>`;
+      onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.7">↗ Iru</a>`;
   }
 
   // ── State ─────────────────────────────────────────────────────────────────
@@ -2894,14 +2894,25 @@ HTML = """<!DOCTYPE html>
 
   async function saveOffboardNotes(email) {
     const notes = document.getElementById('offboardNotes').value;
-    const res = await fetch('/api/offboarding/update', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({email, notes})
-    });
-    const data = await res.json();
-    const msg = document.getElementById('offboardSaveMsg');
-    if (data.ok) { msg.textContent = 'Saved ✓'; setTimeout(() => msg.textContent='', 2000); }
-    else { msg.style.color='#f87171'; msg.textContent = data.error || 'Error saving'; }
+    const btn = document.querySelector('#offboardContent .btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+      const res  = await fetch('/api/offboarding/update', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({email, notes})
+      });
+      const data = await res.json();
+      if (data.ok) {
+        if (btn) { btn.textContent = '✓ Saved'; btn.style.background = '#22c55e'; }
+        setTimeout(() => closeOffboardModal(), 800);
+      } else {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save Notes'; }
+        alert(data.error || 'Error saving notes.');
+      }
+    } catch(e) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Save Notes'; }
+      alert('Network error: ' + e.message);
+    }
   }
 
   // Boot
