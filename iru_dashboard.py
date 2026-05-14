@@ -9,6 +9,7 @@ On first run you'll be prompted for your subdomain + API token,
 which are saved to iru_config.json next to this script.
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -31,6 +32,7 @@ from threading import Timer
 # ---------------------------------------------------------------------------
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iru_config.json")
 CACHE_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iru_cache.json")
+USERS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_users.json")
 PORT        = int(os.environ.get("PORT", 8080))
 CACHE_TTL   = 15 * 60   # seconds between automatic background refreshes
 
@@ -54,8 +56,50 @@ def _config_from_env():
 CLOUD_MODE = _config_from_env() is not None
 
 # ---------------------------------------------------------------------------
-# Auth  (session-based login)
+# Auth  (session-based login, multi-user)
 # ---------------------------------------------------------------------------
+SESSION_TTL    = 8 * 3600   # 8 hours
+_sessions      = {}          # token → {"expiry": float, "username": str}
+_sessions_lock = threading.Lock()
+_users_lock    = threading.Lock()
+
+
+def _hash_password(password):
+    """Hash a password with PBKDF2-SHA256 + random salt."""
+    salt = os.urandom(16)
+    key  = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 260000)
+    return base64.b64encode(salt + key).decode('ascii')
+
+
+def _verify_password(password, stored_hash):
+    """Return True if password matches stored_hash."""
+    try:
+        decoded = base64.b64decode(stored_hash.encode('ascii'))
+        salt, key = decoded[:16], decoded[16:]
+        new_key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 260000)
+        return hmac.compare_digest(key, new_key)
+    except Exception:
+        return False
+
+
+def _load_users():
+    """Return list of user dicts from dashboard_users.json."""
+    with _users_lock:
+        if os.path.exists(USERS_FILE):
+            try:
+                with open(USERS_FILE) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return []
+
+
+def _save_users(users):
+    with _users_lock:
+        with open(USERS_FILE, 'w') as f:
+            json.dump(users, f, indent=2)
+
+
 def _get_dashboard_creds():
     """Return (user, pass) — env vars take priority, then iru_config.json, then defaults."""
     u = os.environ.get("DASHBOARD_USER", "")
@@ -71,17 +115,26 @@ def _get_dashboard_creds():
             pass
     return u or "admin", p
 
-DASHBOARD_USER, DASHBOARD_PASS = _get_dashboard_creds()
-SESSION_TTL    = 8 * 3600   # 8 hours
 
-_sessions      = {}          # token → expiry timestamp
-_sessions_lock = threading.Lock()
+def _init_users():
+    """On first run: migrate from single-user config to new multi-user users file."""
+    if os.path.exists(USERS_FILE):
+        return
+    u_old, p_old = _get_dashboard_creds()
+    if p_old:
+        users = [{
+            "username":     u_old,
+            "password_hash": _hash_password(p_old),
+            "created_at":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }]
+        _save_users(users)
+        print(f"[Auth] Migrated user '{u_old}' to dashboard_users.json")
 
 
-def _create_session():
+def _create_session(username):
     token = str(uuid.uuid4())
     with _sessions_lock:
-        _sessions[token] = time.time() + SESSION_TTL
+        _sessions[token] = {"expiry": time.time() + SESSION_TTL, "username": username}
     return token
 
 
@@ -89,25 +142,40 @@ def _valid_session(token):
     if not token:
         return False
     with _sessions_lock:
-        exp = _sessions.get(token)
-        if not exp:
+        entry = _sessions.get(token)
+        if not entry:
             return False
-        if time.time() > exp:
+        if time.time() > entry["expiry"]:
             del _sessions[token]
             return False
         # Sliding window — refresh expiry on activity
-        _sessions[token] = time.time() + SESSION_TTL
+        entry["expiry"] = time.time() + SESSION_TTL
     return True
 
 
+def _get_session_username(token):
+    if not token:
+        return None
+    with _sessions_lock:
+        entry = _sessions.get(token)
+        return entry["username"] if entry else None
+
+
 def _check_credentials(username, password):
-    # Re-read live values so a password update via Settings takes effect immediately
+    users = _load_users()
+    if users:
+        for user in users:
+            if hmac.compare_digest(username.strip(), user["username"]):
+                return _verify_password(password.strip(), user["password_hash"])
+        return False
+    # Fallback: no users file yet — use old single-user config
     u, p = _get_dashboard_creds()
     if not p:
-        return False   # refuse login if no password is configured
-    ok_user = hmac.compare_digest(username.strip(), u)
-    ok_pass = hmac.compare_digest(password.strip(), p)
-    return ok_user and ok_pass
+        return False
+    return hmac.compare_digest(username.strip(), u) and hmac.compare_digest(password.strip(), p)
+
+
+DASHBOARD_USER, DASHBOARD_PASS = _get_dashboard_creds()
 
 # ---------------------------------------------------------------------------
 # Cache  (in-memory + disk-persistent)
@@ -1061,6 +1129,7 @@ HTML = """<!DOCTYPE html>
     <button class="tab" onclick="switchTab('users', this)">👥 Users</button>
     <button class="tab" onclick="switchTab('orphaned', this)">🚨 Orphaned Devices</button>
     <button class="tab" onclick="switchTab('departments', this)">🏢 By Department</button>
+    <button class="tab" onclick="switchTab('admin', this)" style="margin-left:auto">🔐 Admin</button>
   </div>
 
   <!-- ── Tab: Overview ── -->
@@ -1448,9 +1517,12 @@ HTML = """<!DOCTYPE html>
   // ── Tabs ──────────────────────────────────────────────────────────────────
   function switchTab(name, btn) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => { p.classList.remove('active'); p.style.display='none'; });
     btn.classList.add('active');
-    document.getElementById('tab-' + name).classList.add('active');
+    const panel = document.getElementById('tab-' + name);
+    panel.classList.add('active');
+    panel.style.display = '';
+    if (name === 'admin') loadAdminTab();
   }
 
   // ── Config ────────────────────────────────────────────────────────────────
@@ -2681,7 +2753,108 @@ HTML = """<!DOCTYPE html>
   // Boot
   fetchAll();
   startCachePolling();
+
+  // ── Admin Tab ─────────────────────────────────────────────────────────────
+  async function loadAdminTab() {
+    const wrap = document.getElementById('adminUsersWrap');
+    wrap.innerHTML = '<div style="color:#64748b;padding:20px">Loading...</div>';
+    try {
+      const res  = await fetch('/api/admin/users');
+      const users = await res.json();
+      if (!users.length) {
+        wrap.innerHTML = '<div style="color:#64748b;padding:20px">No users found.</div>';
+        return;
+      }
+      wrap.innerHTML = `
+        <table class="data-table" style="width:100%;max-width:600px">
+          <thead><tr>
+            <th>Username</th>
+            <th>Created</th>
+            <th style="width:220px">Actions</th>
+          </tr></thead>
+          <tbody>
+          ${users.map(u => `
+            <tr>
+              <td style="font-weight:500">${esc(u.username)}${u.is_me ? ' <span style="font-size:11px;color:#64748b">(you)</span>' : ''}</td>
+              <td style="color:#64748b;font-size:13px">${u.created_at ? u.created_at.slice(0,10) : '—'}</td>
+              <td style="display:flex;gap:6px">
+                <button class="btn btn-secondary" style="font-size:12px;padding:4px 10px"
+                  onclick="adminChangePass('${esc(u.username)}')">Change Password</button>
+                ${u.is_me ? '' : `<button class="btn" style="font-size:12px;padding:4px 10px;background:#ef4444;color:#fff"
+                  onclick="adminDeleteUser('${esc(u.username)}')">Remove</button>`}
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+    } catch(e) {
+      wrap.innerHTML = `<div style="color:#f87171">Error: ${e.message}</div>`;
+    }
+  }
+
+  async function adminAddUser() {
+    const username = document.getElementById('adminNewUser').value.trim();
+    const password = document.getElementById('adminNewPass').value.trim();
+    const msg = document.getElementById('adminMsg');
+    msg.textContent = '';
+    if (!username || !password) { msg.style.color='#f87171'; msg.textContent='Username and password are required.'; return; }
+    if (password.length < 8)    { msg.style.color='#f87171'; msg.textContent='Password must be at least 8 characters.'; return; }
+    const res  = await fetch('/api/admin/users/add', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username, password})});
+    const data = await res.json();
+    if (data.ok) {
+      msg.style.color='#22c55e'; msg.textContent=`User '${username}' added.`;
+      document.getElementById('adminNewUser').value = '';
+      document.getElementById('adminNewPass').value = '';
+      loadAdminTab();
+    } else {
+      msg.style.color='#f87171'; msg.textContent = data.error || 'Error adding user.';
+    }
+  }
+
+  async function adminDeleteUser(username) {
+    if (!confirm(`Remove user '${username}'? They will no longer be able to log in.`)) return;
+    const res  = await fetch('/api/admin/users/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username})});
+    const data = await res.json();
+    if (data.ok) { loadAdminTab(); }
+    else { alert(data.error || 'Error removing user.'); }
+  }
+
+  async function adminChangePass(username) {
+    const newPass = prompt(`New password for '${username}' (min 8 characters):`);
+    if (!newPass) return;
+    if (newPass.length < 8) { alert('Password must be at least 8 characters.'); return; }
+    const res  = await fetch('/api/admin/users/password', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username, password: newPass})});
+    const data = await res.json();
+    if (data.ok) { alert(`Password updated for '${username}'.`); }
+    else { alert(data.error || 'Error updating password.'); }
+  }
 </script>
+
+<!-- ── Admin Tab Panel ── -->
+<div class="tab-panel" id="tab-admin" style="display:none;padding:32px 24px;max-width:800px;margin:0 auto">
+  <h2 style="font-size:18px;font-weight:600;margin:0 0 6px">Dashboard Users</h2>
+  <p style="color:#64748b;font-size:13px;margin:0 0 24px">Manage who can log in to this dashboard.</p>
+
+  <div id="adminUsersWrap" style="margin-bottom:32px"></div>
+
+  <div style="background:#1e293b;border-radius:10px;padding:20px;max-width:500px">
+    <div style="font-size:14px;font-weight:600;margin-bottom:14px">Add New User</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+      <div>
+        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Username</label>
+        <input type="text" id="adminNewUser" placeholder="e.g. jane"
+          style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px 10px;color:#f1f5f9;font-size:14px">
+      </div>
+      <div>
+        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Password</label>
+        <input type="password" id="adminNewPass" placeholder="Min 8 characters"
+          style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px 10px;color:#f1f5f9;font-size:14px">
+      </div>
+    </div>
+    <button class="btn" onclick="adminAddUser()" style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px">Add User</button>
+    <div id="adminMsg" style="margin-top:8px;font-size:13px;min-height:18px"></div>
+  </div>
+</div>
+
 </body>
 </html>
 """
@@ -2871,6 +3044,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._text_error(500, str(e))
 
+        elif self.path == "/api/admin/users":
+            token = self._get_cookie("session")
+            me = _get_session_username(token)
+            users = _load_users()
+            self._json_response([
+                {"username": u["username"], "created_at": u.get("created_at",""), "is_me": u["username"] == me}
+                for u in users
+            ])
+
         else:
             self.send_error(404)
 
@@ -2886,7 +3068,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             username = params.get("username", "")
             password = params.get("password", "")
             if _check_credentials(username, password):
-                token = _create_session()
+                token = _create_session(username)
                 self._set_session_cookie(token)
             else:
                 self._redirect("/login?error=1")
@@ -2943,6 +3125,70 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 print("\n🛑 Server stopped via dashboard button.")
                 os._exit(0)
             Timer(0.1, _do_stop).start()
+
+        elif self.path == "/api/admin/users/add":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            new_user = body.get("username", "").strip()
+            new_pass = body.get("password", "").strip()
+            if not new_user or not new_pass:
+                self._json_response({"ok": False, "error": "Username and password are required."})
+                return
+            if len(new_pass) < 8:
+                self._json_response({"ok": False, "error": "Password must be at least 8 characters."})
+                return
+            users = _load_users()
+            if any(u["username"] == new_user for u in users):
+                self._json_response({"ok": False, "error": f"User '{new_user}' already exists."})
+                return
+            users.append({
+                "username":     new_user,
+                "password_hash": _hash_password(new_pass),
+                "created_at":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            })
+            _save_users(users)
+            self._json_response({"ok": True})
+
+        elif self.path == "/api/admin/users/delete":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            target = body.get("username", "").strip()
+            token  = self._get_cookie("session")
+            me     = _get_session_username(token)
+            if target == me:
+                self._json_response({"ok": False, "error": "You cannot delete your own account."})
+                return
+            users = _load_users()
+            updated = [u for u in users if u["username"] != target]
+            if len(updated) == len(users):
+                self._json_response({"ok": False, "error": "User not found."})
+                return
+            if len(updated) == 0:
+                self._json_response({"ok": False, "error": "Cannot delete the last user."})
+                return
+            _save_users(updated)
+            self._json_response({"ok": True})
+
+        elif self.path == "/api/admin/users/password":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            target   = body.get("username", "").strip()
+            new_pass = body.get("password", "").strip()
+            if len(new_pass) < 8:
+                self._json_response({"ok": False, "error": "Password must be at least 8 characters."})
+                return
+            users = _load_users()
+            found = False
+            for u in users:
+                if u["username"] == target:
+                    u["password_hash"] = _hash_password(new_pass)
+                    found = True
+                    break
+            if not found:
+                self._json_response({"ok": False, "error": "User not found."})
+                return
+            _save_users(users)
+            self._json_response({"ok": True})
 
         else:
             self.send_error(404)
@@ -3037,6 +3283,9 @@ def main():
             print(f"✅ Loaded config  →  subdomain: {cfg['subdomain']}  region: {cfg.get('region','us')}")
 
     DashboardHandler.config = cfg
+
+    # Migrate single-user config to multi-user users file (no-op if already done)
+    _init_users()
 
     # Load cached data from disk so first page load is instant
     _load_cache_from_disk()
