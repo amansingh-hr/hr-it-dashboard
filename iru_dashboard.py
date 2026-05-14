@@ -3094,17 +3094,34 @@ HTML = """<!DOCTYPE html>
     document.getElementById('pieModalOverlay').classList.remove('open');
   }
 
-  // ── Offboarding Checklist ─────────────────────────────────────────────────
-  function obCheck(icon, label, checked, id, email, field) {
-    const bg = checked ? '#14532d' : '#1e293b';
-    const ic = checked ? '✅' : '⬜';
-    return `<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:${bg};border-radius:8px;cursor:pointer"
-      onclick="document.getElementById('${id}').click()">
-      <input type="checkbox" id="${id}" ${checked ? 'checked' : ''}
-        onchange="saveOffboardField('${email}','${field}',this.checked);this.closest('div').style.background=this.checked?'#14532d':'#1e293b'"
-        style="width:16px;height:16px;cursor:pointer;accent-color:#22c55e">
-      <span style="font-size:15px">${icon}</span>
-      <span style="font-size:13px;font-weight:500">${label}</span>
+  // ── Offboarding Modal ─────────────────────────────────────────────────────
+  function obToggle(icon, label, sublabel, checked, id, email, field) {
+    const done = checked;
+    return `
+    <div id="obrow_${id}" onclick="document.getElementById('${id}').click()"
+      style="display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:10px;cursor:pointer;
+             border:1px solid ${done ? '#166534' : '#1e293b'};background:${done ? '#052e16' : '#0f172a'};
+             transition:all .15s" onmouseover="this.style.borderColor='${done?'#22c55e':'#334155'}'"
+      onmouseout="this.style.borderColor='${done?'#166534':'#1e293b'}'">
+      <input type="checkbox" id="${id}" ${done ? 'checked' : ''} style="display:none"
+        onchange="saveOffboardField('${email}','${field}',this.checked);
+          const row=document.getElementById('obrow_${id}');
+          const ring=document.getElementById('ring_${id}');
+          row.style.background=this.checked?'#052e16':'#0f172a';
+          row.style.borderColor=this.checked?'#166534':'#1e293b';
+          ring.style.background=this.checked?'#22c55e':'transparent';
+          ring.style.borderColor=this.checked?'#22c55e':'#475569';
+          ring.innerHTML=this.checked?'<span style=color:#fff;font-size:12px;font-weight:700>✓</span>':''">
+      <div id="ring_${id}" style="width:24px;height:24px;border-radius:50%;border:2px solid ${done?'#22c55e':'#475569'};
+           background:${done?'#22c55e':'transparent'};display:flex;align-items:center;justify-content:center;flex-shrink:0">
+        ${done ? '<span style="color:#fff;font-size:12px;font-weight:700">✓</span>' : ''}
+      </div>
+      <span style="font-size:17px;flex-shrink:0">${icon}</span>
+      <div style="flex:1">
+        <div style="font-size:13px;font-weight:500;color:${done?'#86efac':'#f1f5f9'}">${label}</div>
+        ${sublabel ? `<div style="font-size:11px;color:#64748b;margin-top:1px">${sublabel}</div>` : ''}
+      </div>
+      ${done ? '<span style="font-size:11px;color:#22c55e;font-weight:600">Done</span>' : '<span style="font-size:11px;color:#475569">Pending</span>'}
     </div>`;
   }
 
@@ -3112,7 +3129,7 @@ HTML = """<!DOCTYPE html>
     const modal   = document.getElementById('offboardModal');
     const content = document.getElementById('offboardContent');
     modal.style.display = 'flex';
-    content.innerHTML = '<div style="color:#64748b;padding:20px">Loading...</div>';
+    content.innerHTML = '<div style="color:#64748b;padding:30px;text-align:center">Loading…</div>';
 
     const ou          = oktaUserMap[email.toLowerCase()];
     const userDevices = allDevicesFlat.filter(d => d.user_email === email.toLowerCase());
@@ -3123,95 +3140,154 @@ HTML = """<!DOCTYPE html>
     const oktaOk     = oktaStatus === 'DEPROVISIONED';
     const termDate   = ou?.profile?.terminationDate || ou?.statusChanged || null;
 
-    const sectionHead = label => `<div style="font-size:11px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.07em;margin:20px 0 8px">${label}</div>`;
+    // Progress calculation
+    const steps = [
+      oktaOk,
+      rec.slack_deactivated,
+      rec.google_deactivated,
+      ...userDevices.map(d => rec?.devices?.[d.device_id]?.received || false),
+      rec.box_shipped,
+      rec.equipment_returned,
+    ];
+    const done  = steps.filter(Boolean).length;
+    const total = steps.length;
+    const pct   = Math.round(done / total * 100);
+    const barColor = pct === 100 ? '#22c55e' : pct >= 50 ? '#f59e0b' : '#f87171';
+
+    const sec = label => `<div style="font-size:10px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.1em;margin:22px 0 10px;display:flex;align-items:center;gap:8px">
+      <div style="flex:1;height:1px;background:#1e293b"></div>${label}<div style="flex:1;height:1px;background:#1e293b"></div></div>`;
 
     content.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+      <!-- Header -->
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
         <div>
-          <div style="font-size:18px;font-weight:600">${esc(name)}</div>
-          <div style="color:#64748b;font-size:13px">${esc(email)}</div>
-          ${termDate ? `<div style="color:#94a3b8;font-size:12px;margin-top:2px">Term date: ${fmtDate(termDate)}</div>` : ''}
+          <div style="font-size:20px;font-weight:700">${esc(name)}</div>
+          <div style="color:#64748b;font-size:13px;margin-top:2px">${esc(email)}</div>
+          ${termDate ? `<div style="font-size:12px;color:#f87171;margin-top:3px">Terminated ${fmtDate(termDate)}</div>` : ''}
         </div>
-        <button onclick="closeOffboardModal()" style="background:none;border:none;color:#64748b;font-size:20px;cursor:pointer;padding:0">✕</button>
+        <button onclick="closeOffboardModal()" style="background:#1e293b;border:none;color:#94a3b8;font-size:16px;cursor:pointer;
+          width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center"
+          onmouseover="this.style.background='#334155'" onmouseout="this.style.background='#1e293b'">✕</button>
       </div>
 
-      ${sectionHead('Account Deactivations')}
-      <div style="display:flex;flex-direction:column;gap:6px">
-        <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:${oktaOk ? '#14532d' : '#431a1a'};border-radius:8px">
-          <span style="font-size:18px">${oktaOk ? '✅' : '⚠️'}</span>
-          <span style="font-size:15px">🔑</span>
-          <div>
-            <div style="font-size:13px;font-weight:500">Okta deprovisioned</div>
-            <div style="font-size:11px;color:#94a3b8">Status: ${oktaStatus}</div>
+      <!-- Progress bar -->
+      <div style="background:#1e293b;border-radius:8px;padding:12px 16px;margin-bottom:4px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-size:12px;font-weight:600;color:#94a3b8">Offboarding Progress</span>
+          <span style="font-size:13px;font-weight:700;color:${barColor}">${done}/${total} complete</span>
+        </div>
+        <div style="background:#0f172a;border-radius:4px;height:8px;overflow:hidden">
+          <div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width .3s"></div>
+        </div>
+      </div>
+
+      ${sec('Accounts')}
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <!-- Okta (read-only) -->
+        <div style="display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:10px;
+             border:1px solid ${oktaOk?'#166534':'#7f1d1d'};background:${oktaOk?'#052e16':'#1a0505'}">
+          <div style="width:24px;height:24px;border-radius:50%;background:${oktaOk?'#22c55e':'#ef4444'};
+               display:flex;align-items:center;justify-content:center;flex-shrink:0">
+            <span style="color:#fff;font-size:12px;font-weight:700">${oktaOk?'✓':'!'}</span>
           </div>
+          <span style="font-size:17px;flex-shrink:0">🔑</span>
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:500;color:${oktaOk?'#86efac':'#fca5a5'}">Okta deprovisioned</div>
+            <div style="font-size:11px;color:#64748b;margin-top:1px">Status: ${oktaStatus}</div>
+          </div>
+          <span style="font-size:11px;color:${oktaOk?'#22c55e':'#ef4444'};font-weight:600">${oktaOk?'Done':'Action needed'}</span>
         </div>
-        ${obCheck('💬', 'Slack deactivated',           rec.slack_deactivated   || false, 'ob_slack',   email, 'slack_deactivated')}
-        ${obCheck('📧', 'Google Workspace deactivated', rec.google_deactivated  || false, 'ob_google',  email, 'google_deactivated')}
+        ${obToggle('💬', 'Slack deactivated',            '', rec.slack_deactivated  || false, 'ob_slack',  email, 'slack_deactivated')}
+        ${obToggle('📧', 'Google Workspace deactivated', '', rec.google_deactivated || false, 'ob_google', email, 'google_deactivated')}
       </div>
 
-      ${sectionHead('Device Return')}
-      <div style="display:flex;flex-direction:column;gap:6px">
+      ${sec('Device Return')}
+      <div style="display:flex;flex-direction:column;gap:8px">
         ${userDevices.length === 0
-          ? `<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:#14532d;border-radius:8px">
-               <span style="font-size:18px">✅</span><span style="font-size:13px">No devices enrolled in MDM</span></div>`
+          ? `<div style="display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:10px;border:1px solid #166534;background:#052e16">
+               <div style="width:24px;height:24px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center">
+                 <span style="color:#fff;font-size:12px;font-weight:700">✓</span></div>
+               <span style="font-size:13px;color:#86efac">No devices enrolled</span></div>`
           : userDevices.map(d => {
               const devRec   = rec?.devices?.[d.device_id] || {};
               const received = devRec.received || false;
-              return `<div style="padding:10px 12px;background:${received ? '#14532d' : '#1e293b'};border-radius:8px;cursor:pointer"
-                onclick="document.getElementById('recv_${d.device_id}').click()">
-                <div style="display:flex;align-items:center;gap:10px">
-                  <input type="checkbox" id="recv_${d.device_id}" ${received ? 'checked' : ''}
-                    onchange="saveDeviceReceived('${email}','${d.device_id}',this.checked);this.closest('div[style]').style.background=this.checked?'#14532d':'#1e293b'"
-                    style="width:16px;height:16px;cursor:pointer;accent-color:#22c55e">
-                  <span style="font-size:15px">💻</span>
-                  <div style="flex:1">
-                    <div style="font-size:13px;font-weight:500">${esc(d.device_name)} ${kandjiLink(d)}</div>
-                    <div style="font-size:12px;color:#94a3b8">${esc(d.model)} · S/N: ${esc(d.serial_number||'—')}</div>
-                  </div>
-                  <span id="recvBadge_${d.device_id}" style="font-size:11px;font-weight:600;padding:3px 10px;border-radius:12px;white-space:nowrap;${received ? 'background:#14532d;color:#86efac' : 'background:#431a1a;color:#fca5a5'}">${received ? '✓ Received' : '⏳ Pending'}</span>
+              return `
+              <div id="devrow_${d.device_id}" onclick="document.getElementById('recv_${d.device_id}').click()"
+                style="display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:10px;cursor:pointer;
+                       border:1px solid ${received?'#166534':'#1e293b'};background:${received?'#052e16':'#0f172a'}"
+                onmouseover="this.style.borderColor='${received?'#22c55e':'#334155'}'"
+                onmouseout="this.style.borderColor='${received?'#166534':'#1e293b'}'">
+                <input type="checkbox" id="recv_${d.device_id}" ${received?'checked':''} style="display:none"
+                  onchange="saveDeviceReceived('${email}','${d.device_id}',this.checked);
+                    const row=document.getElementById('devrow_${d.device_id}');
+                    const ring=document.getElementById('devring_${d.device_id}');
+                    const badge=document.getElementById('recvBadge_${d.device_id}');
+                    row.style.background=this.checked?'#052e16':'#0f172a';
+                    row.style.borderColor=this.checked?'#166534':'#1e293b';
+                    ring.style.background=this.checked?'#22c55e':'transparent';
+                    ring.style.borderColor=this.checked?'#22c55e':'#475569';
+                    ring.innerHTML=this.checked?'<span style=color:#fff;font-size:12px;font-weight:700>✓</span>':'';
+                    badge.textContent=this.checked?'Done':'Pending';
+                    badge.style.color=this.checked?'#22c55e':'#475569'">
+                <div id="devring_${d.device_id}" style="width:24px;height:24px;border-radius:50%;flex-shrink:0;
+                     border:2px solid ${received?'#22c55e':'#475569'};background:${received?'#22c55e':'transparent'};
+                     display:flex;align-items:center;justify-content:center">
+                  ${received?'<span style="color:#fff;font-size:12px;font-weight:700">✓</span>':''}
                 </div>
-                ${received && devRec.received_at ? `<div style="font-size:11px;color:#64748b;margin-top:4px;padding-left:26px">Received: ${devRec.received_at.slice(0,10)}</div>` : ''}
+                <span style="font-size:17px;flex-shrink:0">💻</span>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:13px;font-weight:500;color:${received?'#86efac':'#f1f5f9'}">${esc(d.device_name)} ${kandjiLink(d)}</div>
+                  <div style="font-size:11px;color:#64748b;margin-top:1px">${esc(d.model)} · S/N: ${esc(d.serial_number||'—')}</div>
+                  ${received && devRec.received_at ? `<div style="font-size:11px;color:#22c55e;margin-top:2px">Received ${devRec.received_at.slice(0,10)}</div>` : ''}
+                </div>
+                <span id="recvBadge_${d.device_id}" style="font-size:11px;font-weight:600;color:${received?'#22c55e':'#475569'}">${received?'Done':'Pending'}</span>
               </div>`;
             }).join('')}
       </div>
 
-      ${sectionHead('Shipping')}
-      <div style="display:flex;flex-direction:column;gap:10px">
-        <div style="background:#1e293b;border-radius:8px;padding:12px">
-          ${obCheck('📦', 'Empty return box shipped to employee', rec.box_shipped || false, 'ob_box', email, 'box_shipped')}
-          <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+      ${sec('Shipping')}
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <!-- Outbound box -->
+        <div style="border:1px solid #1e293b;border-radius:10px;overflow:hidden">
+          ${obToggle('📦', 'Empty return box shipped to employee', 'Outbound — box sent to employee for packing', rec.box_shipped || false, 'ob_box', email, 'box_shipped')}
+          <div style="padding:10px 16px 14px;background:#080f1a;display:flex;gap:8px;align-items:center">
             <input type="text" id="outboundTracking" value="${esc(rec.outbound_tracking||'')}"
-              placeholder="Outbound FedEx tracking #"
+              placeholder="FedEx outbound tracking #"
               onblur="saveOffboardField('${email}','outbound_tracking',this.value)"
-              style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:7px 10px;color:#f1f5f9;font-size:13px">
-            <button class="btn btn-secondary" style="font-size:12px;padding:6px 12px;white-space:nowrap"
+              style="flex:1;background:#0f172a;border:1px solid #1e293b;border-radius:7px;padding:8px 12px;color:#f1f5f9;font-size:13px;outline:none"
+              onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='#1e293b';saveOffboardField('${email}','outbound_tracking',this.value)">
+            <button class="btn btn-secondary" style="font-size:12px;padding:7px 14px;white-space:nowrap;border-radius:7px"
               onclick="saveOffboardField('${email}','outbound_tracking',document.getElementById('outboundTracking').value);trackFedEx('outboundTracking','outboundStatus')">Track</button>
           </div>
-          <div id="outboundStatus" style="font-size:12px;color:#94a3b8;margin-top:6px;min-height:16px"></div>
+          <div id="outboundStatus" style="font-size:12px;padding:0 16px 12px;background:#080f1a;color:#64748b;min-height:0"></div>
         </div>
 
-        <div style="background:#1e293b;border-radius:8px;padding:12px">
-          ${obCheck('📬', 'Equipment returned by employee', rec.equipment_returned || false, 'ob_return', email, 'equipment_returned')}
-          <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+        <!-- Return box -->
+        <div style="border:1px solid #1e293b;border-radius:10px;overflow:hidden">
+          ${obToggle('📬', 'Equipment returned by employee', 'Inbound — employee ships device back', rec.equipment_returned || false, 'ob_return', email, 'equipment_returned')}
+          <div style="padding:10px 16px 14px;background:#080f1a;display:flex;gap:8px;align-items:center">
             <input type="text" id="returnTracking" value="${esc(rec.return_tracking||'')}"
-              placeholder="Return FedEx tracking #"
+              placeholder="FedEx return tracking #"
               onblur="saveOffboardField('${email}','return_tracking',this.value)"
-              style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:7px 10px;color:#f1f5f9;font-size:13px">
-            <button class="btn btn-secondary" style="font-size:12px;padding:6px 12px;white-space:nowrap"
+              style="flex:1;background:#0f172a;border:1px solid #1e293b;border-radius:7px;padding:8px 12px;color:#f1f5f9;font-size:13px;outline:none"
+              onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='#1e293b';saveOffboardField('${email}','return_tracking',this.value)">
+            <button class="btn btn-secondary" style="font-size:12px;padding:7px 14px;white-space:nowrap;border-radius:7px"
               onclick="saveOffboardField('${email}','return_tracking',document.getElementById('returnTracking').value);trackFedEx('returnTracking','returnStatus')">Track</button>
           </div>
-          <div id="returnStatus" style="font-size:12px;color:#94a3b8;margin-top:6px;min-height:16px"></div>
+          <div id="returnStatus" style="font-size:12px;padding:0 16px 12px;background:#080f1a;color:#64748b;min-height:0"></div>
         </div>
       </div>
 
-      ${sectionHead('Notes')}
-      <textarea id="offboardNotes" rows="3" placeholder="e.g. Contacted employee on 5/10, device shipped via FedEx..."
-        style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:10px;color:#f1f5f9;font-size:13px;resize:vertical"
+      ${sec('Notes')}
+      <textarea id="offboardNotes" rows="3" placeholder="e.g. Contacted employee on 5/10, shipped via FedEx…"
+        style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #1e293b;border-radius:10px;
+               padding:12px;color:#f1f5f9;font-size:13px;resize:vertical;outline:none;line-height:1.5"
+        onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='#1e293b'"
       >${esc(rec?.notes || '')}</textarea>
-      <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+      <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:12px">
+        <span id="offboardSaveMsg" style="font-size:12px;color:#22c55e"></span>
         <button class="btn" onclick="saveOffboardAll('${email}')"
-          style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px">Save</button>
-        <span id="offboardSaveMsg" style="font-size:13px;color:#22c55e"></span>
+          style="background:#3b82f6;color:#fff;padding:9px 24px;font-size:13px;font-weight:600;border-radius:8px">Save</button>
       </div>`;
 
     // Auto-fetch FedEx status if tracking numbers are already saved
