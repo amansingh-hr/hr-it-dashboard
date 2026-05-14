@@ -3194,19 +3194,18 @@ HTML = """<!DOCTYPE html>
       </div>`;
     }
 
-    function trackingCard(trackingId, statusId, toggleHtml, placeholder, savedVal, fieldName) {
+    function trackingCard(trackingId, statusId, toggleHtml, placeholder, savedVal, fieldName, autoCheckId, autoCheckField) {
       return `
       <div style="border:1px solid #1e293b;border-radius:10px;overflow:hidden;background:#0a1628">
         ${toggleHtml}
-        <div style="padding:10px 14px 12px;display:flex;gap:8px;align-items:center">
+        <div style="padding:10px 14px 4px">
           <input type="text" id="${trackingId}" value="${esc(savedVal||'')}"
             placeholder="${placeholder}"
-            style="flex:1;background:#0f172a;border:1px solid #1e293b;border-radius:7px;padding:7px 10px;color:#f1f5f9;font-size:12px;outline:none"
-            onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='#1e293b';saveOffboardField('${email}','${fieldName}',this.value)">
-          <button class="btn btn-secondary" style="font-size:11px;padding:6px 12px;white-space:nowrap;border-radius:7px"
-            onclick="saveOffboardField('${email}','${fieldName}',document.getElementById('${trackingId}').value);trackFedEx('${trackingId}','${statusId}')">Track</button>
+            style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #1e293b;border-radius:7px;padding:7px 10px;color:#f1f5f9;font-size:12px;outline:none;font-family:monospace"
+            onfocus="this.style.borderColor='#3b82f6'"
+            onblur="this.style.borderColor='#1e293b';saveOffboardField('${email}','${fieldName}',this.value);if(this.value.trim())trackFedEx('${trackingId}','${statusId}','${autoCheckId}','${autoCheckField}','${email}')">
         </div>
-        <div id="${statusId}" style="font-size:11px;padding:0 14px 10px;color:#64748b;min-height:0"></div>
+        <div id="${statusId}" style="font-size:11px;padding:4px 14px 10px;color:#64748b;min-height:18px"></div>
       </div>`;
     }
 
@@ -3263,10 +3262,10 @@ HTML = """<!DOCTYPE html>
           <div style="margin-top:14px">${colHead('Shipping')}</div>
           ${trackingCard('outboundTracking','outboundStatus',
             obToggle('📦','Empty return box shipped to employee','Outbound — box sent to employee for packing', rec.box_shipped||false,'ob_box',email,'box_shipped'),
-            'FedEx outbound tracking #', rec.outbound_tracking, 'outbound_tracking')}
+            'FedEx outbound tracking #', rec.outbound_tracking, 'outbound_tracking', 'ob_box', 'box_shipped')}
           ${trackingCard('returnTracking','returnStatus',
             obToggle('📬','Equipment returned by employee','Inbound — employee ships device back', rec.equipment_returned||false,'ob_return',email,'equipment_returned'),
-            'FedEx return tracking #', rec.return_tracking, 'return_tracking')}
+            'FedEx return tracking #', rec.return_tracking, 'return_tracking', 'ob_return', 'equipment_returned')}
         </div>
 
         <!-- RIGHT: Device Return + Notes -->
@@ -3294,8 +3293,8 @@ HTML = """<!DOCTYPE html>
       </div>`;
 
     // Auto-fetch FedEx status if tracking numbers are already saved
-    if (rec.outbound_tracking) trackFedEx('outboundTracking', 'outboundStatus');
-    if (rec.return_tracking)   trackFedEx('returnTracking',   'returnStatus');
+    if (rec.outbound_tracking) trackFedEx('outboundTracking', 'outboundStatus', 'ob_box',    'box_shipped',        email);
+    if (rec.return_tracking)   trackFedEx('returnTracking',   'returnStatus',   'ob_return', 'equipment_returned', email);
   }
 
   function closeOffboardModal() {
@@ -3356,20 +3355,33 @@ HTML = """<!DOCTYPE html>
     }
   }
 
-  async function trackFedEx(inputId, statusId) {
-    const tracking = document.getElementById(inputId).value.trim();
+  function fmtDeliveryDate(dateStr) {
+    if (!dateStr) return '';
+    const p = dateStr.split('-');
+    return p.length === 3 ? `${p[1]}/${p[2]}/${p[0]}` : dateStr;
+  }
+
+  async function trackFedEx(inputId, statusId, autoCheckId, autoCheckField, autoEmail) {
+    const tracking = document.getElementById(inputId)?.value.trim();
     const statusEl = document.getElementById(statusId);
-    if (!tracking) { statusEl.textContent = 'Enter a tracking number first.'; return; }
-    statusEl.style.color = '#94a3b8';
+    if (!statusEl) return;
+    if (!tracking) { statusEl.textContent = ''; return; }
+    statusEl.style.color = '#64748b';
     statusEl.textContent = 'Looking up…';
     try {
       const res  = await fetch('/api/fedex-track?tracking=' + encodeURIComponent(tracking));
       const data = await res.json();
       if (data.ok) {
-        statusEl.style.color = '#22c55e';
         const label = data.statusByLocale || data.status || 'Status unknown';
-        const dateStr = data.deliveryDate ? ` · ${data.deliveryDate}` : '';
+        const dateStr = data.deliveryDate ? ` · ${fmtDeliveryDate(data.deliveryDate)}` : '';
+        const isDelivered = data.code === 'DL' || label.toLowerCase().includes('delivered');
+        statusEl.style.color = isDelivered ? '#22c55e' : '#f59e0b';
         statusEl.textContent = label + dateStr;
+        // Auto-check the related toggle if delivered
+        if (isDelivered && autoCheckId) {
+          const cb = document.getElementById(autoCheckId);
+          if (cb && !cb.checked) cb.click();
+        }
       } else {
         statusEl.style.color = '#f87171';
         statusEl.textContent = data.error || 'Error fetching status';
