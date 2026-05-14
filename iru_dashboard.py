@@ -1531,19 +1531,25 @@ HTML = """<!DOCTYPE html>
     return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
-  function kandjiUrl(d) {
-    if (!d || d.source !== 'iru' || !d.device_id) return null;
-    const sub = window.iruSubdomain || 'hungryroot';
-    return `https://${sub}.iru.com/devices/${d.device_id}`;
+  function deviceConsoleUrl(d) {
+    if (!d) return null;
+    if (d.source === 'iru' && d.device_id)
+      return { url: `https://${window.iruSubdomain || 'hungryroot'}.iru.com/devices/${d.device_id}`, label: 'Iru' };
+    if (d.source === 'jumpcloud' && d.jc_system_id)
+      return { url: `https://console.jumpcloud.com/ui/systems/${d.jc_system_id}/details`, label: 'JumpCloud' };
+    return null;
   }
 
   function kandjiLink(d) {
-    const url = kandjiUrl(d);
-    if (!url) return '';
-    return `<a href="${url}" target="_blank" title="Open in Iru"
+    const info = deviceConsoleUrl(d);
+    if (!info) return '';
+    return `<a href="${info.url}" target="_blank" title="Open in ${info.label}"
       style="color:#64748b;font-size:11px;margin-left:5px;text-decoration:none;opacity:0.7"
-      onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.7">↗ Iru</a>`;
+      onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.7">↗ ${info.label}</a>`;
   }
+
+  // Keep old name as alias (used in offboarding modal)
+  function kandjiUrl(d) { return deviceConsoleUrl(d)?.url || null; }
 
   // ── State ─────────────────────────────────────────────────────────────────
   let allDevicesFlat = [];
@@ -1834,6 +1840,7 @@ HTML = """<!DOCTYPE html>
         _idx:             idx,
         _raw:             d,          // full raw object for details drawer
         device_id:        d.device_id || d.id || '',
+        jc_system_id:     d._extra?.jc_system_id || '',
         device_name:      d.device_name || d.name || '—',
         model:            d.model || '—',
         device_family:    fam,
