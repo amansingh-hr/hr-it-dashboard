@@ -4102,7 +4102,9 @@ HTML = """<!DOCTYPE html>
       if (overlay) { overlay.style.display = 'flex'; }
     }
   }
-  initSession().then(() => { fetchAll(); startCachePolling(); });
+  initSession();
+  fetchAll();
+  startCachePolling();
 
   // ── Onboarding Tab ───────────────────────────────────────────────────────
   async function loadOnboardingTab() {
