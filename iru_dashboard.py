@@ -3779,7 +3779,12 @@ HTML = """<!DOCTYPE html>
     flagged.sort((a,  b) => a.diffDays - b.diffDays);
 
     // Stat pills
-    const thisWeek = upcoming.filter(x => x.diffDays <= 7).length;
+    // "This week" = now through end of Sunday (calendar week, not rolling 7 days)
+    const dayOfWeek = today.getDay(); // 0=Sun,1=Mon,...,6=Sat
+    const daysUntilSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
+    const endOfWeek = new Date(today);
+    endOfWeek.setDate(today.getDate() + daysUntilSunday);
+    const thisWeek = upcoming.filter(x => x.hire <= endOfWeek).length;
     statsEl.innerHTML = [
       {label:'Starting this week', val: thisWeek, bg:'rgba(34,197,94,.15)',  color:'#4ade80'},
       {label:'Upcoming total',     val: upcoming.length, bg:'rgba(59,130,246,.15)', color:'#60a5fa'},
@@ -3803,7 +3808,7 @@ HTML = """<!DOCTYPE html>
           <tbody>
           ${upcoming.map(({u, p, hire, diffDays, status}) => {
             const isToday = diffDays === 0;
-            const isSoon  = diffDays <= 7;
+            const isSoon  = hire <= endOfWeek && diffDays > 0;
             const rowBg   = isToday ? 'background:rgba(34,197,94,.07)' : isSoon ? 'background:rgba(245,158,11,.05)' : '';
             const manager = p.manager || p.managerId || '—';
             return `<tr style="${rowBg}">
