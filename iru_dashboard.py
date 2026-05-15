@@ -42,14 +42,30 @@ MAX_ACTIVITY      = 1000
 PORT              = int(os.environ.get("PORT", 8080))
 CACHE_TTL   = 15 * 60   # used for staleness checks; auto-refresh is disabled (refresh on login instead)
 
-# Onboarding roster spreadsheet (separate from the offboarding/users sheet)
-ONBOARDING_ROSTER_SHEET_ID = "10JdT1skrlPpyHMSxg_0P4BeroI0iIbFXgdO6SlCq37c"
-ONBOARDING_ROSTER_TAB      = "New Employee Roster (Imported: People Team)"
+# Onboarding spreadsheet (both tabs live in the same file)
+ONBOARDING_ROSTER_SHEET_ID  = "10JdT1skrlPpyHMSxg_0P4BeroI0iIbFXgdO6SlCq37c"
+ONBOARDING_ROSTER_TAB       = "New Employee Roster (Imported: People Team)"
+ONBOARDING_TRACKER_TAB      = "NEW: IT Onboarding Tracker"
 ONBOARDING_CHECKLIST_FIELDS = [
     "Equipment Tracking",
     "Welcome Email (IT & People Team)",
     "IT Equipment Tracking Email",
     "Okta Activation Email",
+]
+# Fields to show in the onboarding detail modal (from ONBOARDING_TRACKER_TAB)
+# Each entry: (display_label, header_substring_to_match, field_type)
+# field_type: "text" | "jira" | "url"
+ONBOARDING_DETAIL_FIELDS = [
+    ("Personal Email",   "Personal Email",        "text"),
+    ("Department",       "Department",             "text"),
+    ("Title",            "Title",                  "text"),
+    ("Hiring Manager",   "Hiring Manager",         "text"),
+    ("Mirror Teammate",  "Mirror",                 "text"),
+    ("Laptop Type",      "Laptop Type",            "text"),
+    ("Laptop Ordered",   "Laptop Ordered",         "text"),
+    ("Jira Ticket",      "Jira",                   "jira"),
+    ("Okta Account",     "Okta Account",           "text"),
+    ("Manager Form",     "Manager Form",           "text"),
 ]
 
 # Cloud deployment: load API credentials from environment variables
@@ -718,6 +734,104 @@ def _onboarding_checklist_read_bulk(emails, cfg=None):
         results[email_lower] = {"fields": fields}
 
     return results
+
+
+def _onboarding_detail_read(email, cfg=None):
+    """Read IT onboarding detail fields for one employee from 'NEW: IT Onboarding Tracker'.
+
+    Row 1 (index 0) is the header row.
+    Employee is matched by HR Email column (header contains 'HR Email').
+    Returns dict: {label → {value, url, type}} for each ONBOARDING_DETAIL_FIELDS entry.
+    """
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or (cfg or {}).get("google_service_account_json", "")
+    if not sa_json:
+        return {"error": "No Google service account configured"}
+
+    email_lower = email.strip().lower()
+    JIRA_BASE   = "https://hungryroot.atlassian.net/browse/"
+
+    try:
+        service  = _get_sheets_service(sa_json)
+        rows_fmt = service.spreadsheets().values().get(
+            spreadsheetId=ONBOARDING_ROSTER_SHEET_ID,
+            range=f"'{ONBOARDING_TRACKER_TAB}'",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [])
+        rows_fml = service.spreadsheets().values().get(
+            spreadsheetId=ONBOARDING_ROSTER_SHEET_ID,
+            range=f"'{ONBOARDING_TRACKER_TAB}'",
+            valueRenderOption="FORMULA",
+        ).execute().get("values", [])
+    except Exception as exc:
+        return {"error": f"Sheet read failed: {exc}"}
+
+    if not rows_fmt:
+        return {"error": "IT Onboarding Tracker sheet is empty"}
+
+    # ── Header row (row 1, index 0) ───────────────────────────────────────────
+    header_row = rows_fmt[0]
+    email_col  = None
+    field_cols = {}   # display_label → col_index
+
+    for c_idx, cell in enumerate(header_row):
+        cell_str = str(cell).strip()
+        # Find HR Email column for matching
+        if email_col is None and "hr email" in cell_str.lower():
+            email_col = c_idx
+        # Find each detail field column
+        for label, match_str, ftype in ONBOARDING_DETAIL_FIELDS:
+            if label not in field_cols and match_str.lower() in cell_str.lower():
+                field_cols[label] = (c_idx, ftype)
+
+    if email_col is None:
+        return {"error": "HR Email column not found in tracker sheet"}
+
+    # ── Find employee row ─────────────────────────────────────────────────────
+    employee_row_idx = None
+    for r_idx, row in enumerate(rows_fmt):
+        if r_idx == 0:
+            continue
+        cell = row[email_col] if email_col < len(row) else ""
+        if isinstance(cell, str) and cell.strip().lower() == email_lower:
+            employee_row_idx = r_idx
+            break
+
+    if employee_row_idx is None:
+        return {"error": "Employee not found in IT Onboarding Tracker", "fields": {}}
+
+    # ── Extract field values ──────────────────────────────────────────────────
+    emp_fmt = rows_fmt[employee_row_idx]
+    emp_fml = rows_fml[employee_row_idx] if employee_row_idx < len(rows_fml) else []
+
+    fields = {}
+    for label, match_str, ftype in ONBOARDING_DETAIL_FIELDS:
+        if label not in field_cols:
+            fields[label] = {"value": "", "url": None, "type": ftype}
+            continue
+
+        c_idx, _ = field_cols[label]
+        raw      = emp_fmt[c_idx] if c_idx < len(emp_fmt) else ""
+        formula  = emp_fml[c_idx] if c_idx < len(emp_fml) else ""
+
+        url = None
+        if ftype == "jira":
+            # Build Jira URL from ticket number in cell
+            ticket = str(raw).strip()
+            if ticket and ticket.upper() not in ("FALSE", "NO", ""):
+                url = ticket if ticket.startswith("http") else JIRA_BASE + ticket
+        elif ftype == "url":
+            url = _parse_hyperlink_formula(formula)
+            if not url and isinstance(raw, str) and raw.strip().startswith("http"):
+                url = raw.strip()
+        else:
+            # Also check for embedded hyperlinks in text fields (e.g. Manager Form)
+            parsed = _parse_hyperlink_formula(formula)
+            if parsed:
+                url = parsed
+
+        fields[label] = {"value": str(raw).strip(), "url": url, "type": ftype}
+
+    return {"email": email, "fields": fields}
 
 
 # ---------------------------------------------------------------------------
@@ -2083,7 +2197,7 @@ HTML = """<!DOCTYPE html>
        onclick="if(event.target===this)closeOnboardingModal()"
        style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1100;align-items:center;justify-content:center">
     <div onclick="event.stopPropagation()"
-         style="background:#1e293b;border-radius:14px;width:520px;max-width:92vw;box-shadow:0 24px 60px rgba(0,0,0,.5);overflow:hidden">
+         style="background:#1e293b;border-radius:14px;width:600px;max-width:94vw;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,.5);overflow:hidden">
       <!-- Header -->
       <div style="padding:20px 24px 16px;border-bottom:1px solid #2d3748;display:flex;align-items:flex-start;gap:14px">
         <div style="flex:1;min-width:0">
@@ -2096,7 +2210,7 @@ HTML = """<!DOCTYPE html>
       <!-- Body -->
       <div style="padding:20px 24px">
         <div style="font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px">IT Onboarding Checklist</div>
-        <div id="oclItems" style="display:flex;flex-direction:column;gap:10px">
+        <div id="oclItems" style="display:flex;flex-direction:column;gap:0;overflow-y:auto;max-height:60vh;scrollbar-width:thin;scrollbar-color:#2d3748 transparent">
           <div style="color:#64748b;font-size:13px;padding:20px;text-align:center">Loading…</div>
         </div>
         <div id="oclError" style="display:none;color:#f87171;font-size:13px;margin-top:10px;padding:10px;background:rgba(239,68,68,.1);border-radius:8px"></div>
@@ -4203,33 +4317,17 @@ HTML = """<!DOCTYPE html>
   }
 
   // ── Onboarding Checklist Modal ────────────────────────────────────────────
-  const OCL_FIELDS = [
-    "Equipment Tracking",
-    "Welcome Email (IT & People Team)",
-    "IT Equipment Tracking Email",
-    "Okta Activation Email",
-  ];
-
-  const OCL_ICONS = {
-    "Equipment Tracking":                 "💻",
-    "Welcome Email (IT & People Team)":   "📧",
-    "IT Equipment Tracking Email":        "📦",
-    "Okta Activation Email":              "🔑",
-  };
-
-  let _oclCurrentEmail = "";
-
+  // ── Onboarding Detail Modal ───────────────────────────────────────────────
   async function openOnboardingModal(email, name) {
-    _oclCurrentEmail = email;
-    document.getElementById('oclName').textContent  = name.trim() || email;
+    document.getElementById('oclName').textContent  = (name||'').trim() || email;
     document.getElementById('oclEmail').textContent = email;
     document.getElementById('oclError').style.display = 'none';
     document.getElementById('oclItems').innerHTML =
-      '<div style="color:#64748b;font-size:13px;padding:20px;text-align:center">Loading checklist…</div>';
+      '<div style="color:#64748b;font-size:13px;padding:20px;text-align:center">Loading…</div>';
     document.getElementById('onboardingChecklistOverlay').style.display = 'flex';
 
     try {
-      const res  = await fetch('/api/onboarding/checklist?email=' + encodeURIComponent(email));
+      const res  = await fetch('/api/onboarding/detail?email=' + encodeURIComponent(email));
       const data = await res.json();
       if (data.error && !data.fields) {
         document.getElementById('oclItems').innerHTML = '';
@@ -4238,107 +4336,98 @@ HTML = """<!DOCTYPE html>
         errEl.style.display = 'block';
         return;
       }
-      renderOclItems(data.fields || {});
+      renderDetailItems(data.fields || {});
     } catch(e) {
       document.getElementById('oclItems').innerHTML = '';
       const errEl = document.getElementById('oclError');
-      errEl.textContent = 'Failed to load checklist: ' + e.message;
+      errEl.textContent = 'Failed to load details: ' + e.message;
       errEl.style.display = 'block';
     }
   }
 
-  // Fields that hold a URL/link instead of a boolean checkbox
-  const OCL_LINK_FIELDS = new Set(["Equipment Tracking"]);
+  const DETAIL_SECTIONS = [
+    {
+      heading: "Employee Info",
+      fields: ["Personal Email","Department","Title","Hiring Manager","Mirror Teammate"],
+    },
+    {
+      heading: "Laptop",
+      fields: ["Laptop Type","Laptop Ordered"],
+    },
+    {
+      heading: "IT Tasks",
+      fields: ["Jira Ticket","Okta Account","Manager Form"],
+    },
+  ];
 
-  function renderOclItems(fields) {
+  const DETAIL_ICONS = {
+    "Personal Email":  "📧",
+    "Department":      "🏢",
+    "Title":           "👤",
+    "Hiring Manager":  "👔",
+    "Mirror Teammate": "🪞",
+    "Laptop Type":     "💻",
+    "Laptop Ordered":  "📦",
+    "Jira Ticket":     "🎫",
+    "Okta Account":    "🔑",
+    "Manager Form":    "📋",
+  };
+
+  function renderDetailItems(fields) {
     const container = document.getElementById('oclItems');
-    const isAdmin   = currentUser.is_admin;
-    container.innerHTML = OCL_FIELDS.map(field => {
-      const fd   = fields[field] || {};
-      const icon = OCL_ICONS[field] || '☑';
-      const raw  = fd.raw || '';
+    let html = '';
 
-      // ── Link-type field (Equipment Tracking) ──────────────────────────────
-      if (OCL_LINK_FIELDS.has(field)) {
-        const url     = fd.url  || '';   // extracted from HYPERLINK formula
-        const hasLink = !!url;
-        const hasSent = !hasLink && !!raw; // has a value but no URL (e.g. "Sent")
-        const done    = hasLink || hasSent;
-        return `
-          <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;
-                      background:${done ? 'rgba(59,130,246,.07)' : 'rgba(30,41,59,.8)'};
-                      border:1px solid ${done ? 'rgba(59,130,246,.25)' : '#2d3748'};
-                      border-radius:10px">
-            <div style="font-size:18px;flex-shrink:0">${icon}</div>
-            <div style="flex:1;min-width:0">
-              <div style="font-size:13px;color:#94a3b8;margin-bottom:4px">${esc(field)}</div>
-              ${hasLink
-                ? `<a href="${esc(url)}" target="_blank" rel="noopener"
-                      style="font-size:13px;color:#60a5fa;text-decoration:underline;text-underline-offset:2px">
-                     🔗 Track shipment
-                   </a>`
-                : hasSent
-                  ? `<span style="font-size:13px;color:#94a3b8">${esc(raw)}</span>`
-                  : `<span style="font-size:13px;color:#475569;font-style:italic">Not assigned yet</span>`}
-            </div>
-            ${done ? `<div style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;flex-shrink:0;
-                            background:rgba(59,130,246,.2);color:#60a5fa">${hasLink ? 'Shipped' : esc(raw)}</div>` : ''}
+    for (const section of DETAIL_SECTIONS) {
+      html += `<div style="font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;
+                            letter-spacing:.06em;margin:${html ? '18px' : '0'} 0 8px">${section.heading}</div>`;
+      for (const label of section.fields) {
+        const fd    = fields[label] || {};
+        const val   = fd.value || '';
+        const url   = fd.url   || '';
+        const icon  = DETAIL_ICONS[label] || '•';
+        const empty = !val && !url;
+
+        let valueHtml;
+        if (label === 'Jira Ticket') {
+          valueHtml = url
+            ? `<a href="${esc(url)}" target="_blank" rel="noopener"
+                  style="color:#60a5fa;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:4px">
+                 ${esc(val) || 'Open ticket'} <span style="font-size:11px">↗</span>
+               </a>`
+            : `<span style="color:#475569;font-style:italic">Not created</span>`;
+        } else if (label === 'Manager Form') {
+          // Truncate long form text; if it's a URL show as link
+          if (url) {
+            valueHtml = `<a href="${esc(url)}" target="_blank" rel="noopener"
+                            style="color:#60a5fa;text-decoration:none">View form ↗</a>`;
+          } else if (val.length > 120) {
+            valueHtml = `<span style="color:#cbd5e1;font-size:12px;line-height:1.5">${esc(val.slice(0,120))}…</span>`;
+          } else {
+            valueHtml = empty
+              ? `<span style="color:#475569;font-style:italic">—</span>`
+              : `<span style="color:#cbd5e1;font-size:12px">${esc(val)}</span>`;
+          }
+        } else {
+          valueHtml = empty
+            ? `<span style="color:#475569;font-style:italic">—</span>`
+            : `<span style="color:#e2e8f0">${esc(val)}</span>`;
+        }
+
+        html += `
+          <div style="display:flex;align-items:baseline;gap:10px;padding:8px 12px;
+                      background:#161b27;border-radius:8px;margin-bottom:4px">
+            <span style="font-size:14px;flex-shrink:0;width:20px;text-align:center">${icon}</span>
+            <span style="font-size:12px;color:#64748b;width:120px;flex-shrink:0">${esc(label)}</span>
+            <span style="flex:1;font-size:13px;word-break:break-word">${valueHtml}</span>
           </div>`;
       }
-
-      // ── Email-sent-type field (any non-empty value = sent) ───────────────
-      const done      = fd.completed || false;  // set server-side: bool(raw.strip())
-      const sentLabel = raw && raw !== 'TRUE' && raw !== 'FALSE' ? esc(raw) : (done ? 'Sent' : 'Not Sent');
-      return `
-        <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;
-                    background:${done ? 'rgba(34,197,94,.08)' : 'rgba(30,41,59,.8)'};
-                    border:1px solid ${done ? 'rgba(34,197,94,.25)' : '#2d3748'};
-                    border-radius:10px">
-          <div style="width:26px;height:26px;border-radius:50%;border:2px solid ${done ? '#4ade80' : '#475569'};
-                      background:${done ? '#4ade80' : 'transparent'};
-                      display:flex;align-items:center;justify-content:center;flex-shrink:0;
-                      font-size:14px;line-height:1">
-            ${done ? '✓' : ''}
-          </div>
-          <div style="font-size:14px">${icon}</div>
-          <div style="flex:1;font-size:14px;font-weight:${done ? '500' : '400'};color:${done ? '#e2e8f0' : '#94a3b8'}">
-            ${esc(field)}
-          </div>
-          <div style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;flex-shrink:0;
-                      background:${done ? 'rgba(34,197,94,.2)' : 'rgba(100,116,139,.15)'};
-                      color:${done ? '#4ade80' : '#64748b'}">
-            ${sentLabel}
-          </div>
-        </div>`;
-    }).join('');
-  }
-
-  async function toggleOclField(field, newCompleted) {
-    const email = _oclCurrentEmail;
-    if (!email) return;
-    try {
-      const res  = await fetch('/api/onboarding/checklist/update', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({email, field, completed: newCompleted}),
-      });
-      const data = await res.json();
-      if (!data.ok) {
-        alert('Update failed: ' + (data.error || 'Unknown error'));
-        return;
-      }
-      // Refresh from server to confirm
-      const r2   = await fetch('/api/onboarding/checklist?email=' + encodeURIComponent(email));
-      const d2   = await r2.json();
-      renderOclItems(d2.fields || {});
-    } catch(e) {
-      alert('Error: ' + e.message);
     }
+
+    container.innerHTML = html || '<div style="color:#64748b;padding:16px;text-align:center">No data found.</div>';
   }
 
   function closeOnboardingModal() {
     document.getElementById('onboardingChecklistOverlay').style.display = 'none';
-    _oclCurrentEmail = "";
   }
 
   // ── Admin Tab ─────────────────────────────────────────────────────────────
@@ -4941,6 +5030,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 }
                 for u in users
             ])
+
+        elif self.path.startswith("/api/onboarding/detail"):
+            from urllib.parse import urlparse, parse_qs
+            qs    = parse_qs(urlparse(self.path).query)
+            email = qs.get("email", [""])[0].strip()
+            if not email:
+                self._json_response({"error": "email parameter required"}, status=400)
+                return
+            data = _onboarding_detail_read(email, self._cfg())
+            self._json_response(data)
 
         elif self.path.startswith("/api/onboarding/checklist"):
             from urllib.parse import urlparse, parse_qs
