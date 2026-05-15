@@ -1569,8 +1569,17 @@ HTML = """<!DOCTYPE html>
   /* ── Error / loading ── */
   .error-box{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);
     border-radius:10px;padding:14px 18px;color:#f87171;margin-bottom:20px;display:none}
-  .loading-state{text-align:center;padding:80px;color:#64748b;display:none}
+  .loading-state{display:none}
   .loading-state.show{display:block}
+  @keyframes shimmer{0%{background-position:-600px 0}100%{background-position:600px 0}}
+  .skel{background:linear-gradient(90deg,#1e2433 25%,#262d3d 50%,#1e2433 75%);
+    background-size:1200px 100%;animation:shimmer 1.6s infinite linear;border-radius:6px}
+  .skel-card{background:#1e2433;border:1px solid #2d3748;border-radius:14px;padding:24px;
+    position:relative;overflow:hidden}
+  .skel-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;
+    border-radius:14px 14px 0 0;background:#2d3748}
+  .skel-bar{height:12px;margin-top:8px}
+  .skel-dot{width:36px;height:36px;border-radius:8px;margin-bottom:16px}
   .data-area{display:none}
   .data-area.show{display:block}
 
@@ -1943,9 +1952,57 @@ HTML = """<!DOCTYPE html>
 
 <div class="error-box" id="errorBox"></div>
 
-<div class="loading-state" id="loadingState">
-  <div style="font-size:48px;margin-bottom:16px">📡</div>
-  <div style="font-size:15px">Fetching devices from Iru, JumpCloud & Okta…</div>
+<div class="loading-state" id="loadingState" style="padding:28px 24px">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:28px">
+    <div style="width:10px;height:10px;border-radius:50%;background:#f38020;animation:shimmer 1.6s infinite linear;background-size:200% 100%"></div>
+    <span style="font-size:13px;color:#64748b;letter-spacing:.04em">Syncing devices from Iru, JumpCloud &amp; Okta…</span>
+  </div>
+  <!-- Skeleton cards row -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:16px;margin-bottom:28px">
+    <div class="skel-card"><div class="skel skel-dot"></div><div class="skel skel-bar" style="width:60%"></div><div class="skel skel-bar" style="width:40%;margin-top:20px;height:28px;border-radius:8px"></div></div>
+    <div class="skel-card"><div class="skel skel-dot"></div><div class="skel skel-bar" style="width:55%"></div><div class="skel skel-bar" style="width:35%;margin-top:20px;height:28px;border-radius:8px"></div></div>
+    <div class="skel-card"><div class="skel skel-dot"></div><div class="skel skel-bar" style="width:50%"></div><div class="skel skel-bar" style="width:30%;margin-top:20px;height:28px;border-radius:8px"></div></div>
+    <div class="skel-card"><div class="skel skel-dot"></div><div class="skel skel-bar" style="width:58%"></div><div class="skel skel-bar" style="width:38%;margin-top:20px;height:28px;border-radius:8px"></div></div>
+  </div>
+  <!-- Skeleton table rows -->
+  <div style="background:#1e2433;border:1px solid #2d3748;border-radius:12px;overflow:hidden">
+    <div style="padding:12px 16px;border-bottom:1px solid #2d3748;display:flex;gap:12px">
+      <div class="skel skel-bar" style="width:80px;height:10px"></div>
+      <div class="skel skel-bar" style="width:140px;height:10px"></div>
+      <div class="skel skel-bar" style="width:100px;height:10px"></div>
+      <div class="skel skel-bar" style="width:60px;height:10px"></div>
+    </div>
+    <div style="padding:14px 16px;border-bottom:1px solid #1a2030;display:flex;gap:12px;align-items:center">
+      <div class="skel skel-bar" style="width:120px;height:12px"></div>
+      <div class="skel skel-bar" style="width:160px;height:12px"></div>
+      <div class="skel skel-bar" style="width:90px;height:12px"></div>
+      <div class="skel skel-bar" style="width:70px;height:12px;margin-left:auto"></div>
+    </div>
+    <div style="padding:14px 16px;border-bottom:1px solid #1a2030;display:flex;gap:12px;align-items:center">
+      <div class="skel skel-bar" style="width:100px;height:12px"></div>
+      <div class="skel skel-bar" style="width:180px;height:12px"></div>
+      <div class="skel skel-bar" style="width:80px;height:12px"></div>
+      <div class="skel skel-bar" style="width:55px;height:12px;margin-left:auto"></div>
+    </div>
+    <div style="padding:14px 16px;border-bottom:1px solid #1a2030;display:flex;gap:12px;align-items:center">
+      <div class="skel skel-bar" style="width:140px;height:12px"></div>
+      <div class="skel skel-bar" style="width:150px;height:12px"></div>
+      <div class="skel skel-bar" style="width:95px;height:12px"></div>
+      <div class="skel skel-bar" style="width:65px;height:12px;margin-left:auto"></div>
+    </div>
+    <div style="padding:14px 16px;border-bottom:1px solid #1a2030;display:flex;gap:12px;align-items:center">
+      <div class="skel skel-bar" style="width:110px;height:12px"></div>
+      <div class="skel skel-bar" style="width:170px;height:12px"></div>
+      <div class="skel skel-bar" style="width:75px;height:12px"></div>
+      <div class="skel skel-bar" style="width:80px;height:12px;margin-left:auto"></div>
+    </div>
+    <div style="padding:14px 16px;display:flex;gap:12px;align-items:center">
+      <div class="skel skel-bar" style="width:130px;height:12px"></div>
+      <div class="skel skel-bar" style="width:155px;height:12px"></div>
+      <div class="skel skel-bar" style="width:85px;height:12px"></div>
+      <div class="skel skel-bar" style="width:60px;height:12px;margin-left:auto"></div>
+    </div>
+  </div>
 </div>
 
 <!-- ── Main data area ─────────────────────────────────────── -->
