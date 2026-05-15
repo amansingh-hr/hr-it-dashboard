@@ -517,12 +517,12 @@ def _onboarding_checklist_read(email, cfg=None):
     if not rows:
         return {"error": "Onboarding sheet is empty"}
 
-    EMAIL_COL = 20  # column U (0-based)
+    EMAIL_COL      = 20  # column U (0-based)
+    HEADER_ROW_IDX = 1   # row 2 in sheet (0-based index 1)
     email_lower = email.strip().lower()
 
     # ── Step 1: find the header row and map field names → column indices ──────
-    header_row_idx = 0
-    header_row     = rows[0] if rows else []
+    header_row = rows[HEADER_ROW_IDX] if len(rows) > HEADER_ROW_IDX else []
     field_cols = {}  # field_name → col_index
     for c_idx, cell in enumerate(header_row):
         cell_str = str(cell).strip()
@@ -531,9 +531,10 @@ def _onboarding_checklist_read(email, cfg=None):
                 field_cols[field] = c_idx
 
     # ── Step 2: find the employee row by matching column U to the email ───────
+    # Data rows start at index 2 (row 3 in sheet)
     employee_row_idx = None
     for r_idx, row in enumerate(rows):
-        if r_idx == header_row_idx:
+        if r_idx <= HEADER_ROW_IDX:
             continue
         cell = row[EMAIL_COL] if EMAIL_COL < len(row) else ""
         if isinstance(cell, str) and cell.strip().lower() == email_lower:
