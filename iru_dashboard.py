@@ -3797,19 +3797,21 @@ HTML = """<!DOCTYPE html>
       upcomingEl.innerHTML = `
         <table class="data-table" style="width:100%">
           <thead><tr>
-            <th>Name</th><th>Email</th><th>Department</th><th>Title</th>
-            <th>Hire Date</th><th>Starts</th><th>Okta Status</th>
+            <th>Name</th><th>Email</th><th>Department</th><th>Title</th><th>Manager</th>
+            <th>Start Date</th><th>Starts</th><th>Activation Email</th>
           </tr></thead>
           <tbody>
           ${upcoming.map(({u, p, hire, diffDays, status}) => {
             const isToday = diffDays === 0;
             const isSoon  = diffDays <= 7;
             const rowBg   = isToday ? 'background:rgba(34,197,94,.07)' : isSoon ? 'background:rgba(245,158,11,.05)' : '';
+            const manager = p.manager || p.managerId || '—';
             return `<tr style="${rowBg}">
               <td style="font-weight:600">${esc((p.firstName||'')+' '+(p.lastName||'')).trim()}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.email||u.email||'')}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.department||'—')}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.title||'—')}</td>
+              <td style="color:#94a3b8;font-size:13px">${esc(manager)}</td>
               <td style="font-size:13px">${hire.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}</td>
               <td>
                 <span style="font-size:12px;font-weight:600;color:${isToday ? '#4ade80' : isSoon ? '#fbbf24' : '#94a3b8'}">
@@ -3831,19 +3833,21 @@ HTML = """<!DOCTYPE html>
         <div style="background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.2);border-radius:10px;padding:4px 0;margin-bottom:8px">
         <table class="data-table" style="width:100%;background:transparent">
           <thead><tr>
-            <th>Name</th><th>Email</th><th>Department</th><th>Hire Date</th>
-            <th>Overdue</th><th>Okta Status</th>
+            <th>Name</th><th>Email</th><th>Department</th><th>Manager</th>
+            <th>Start Date</th><th>Overdue</th><th>Activation Email</th>
           </tr></thead>
           <tbody>
-          ${flagged.map(({u, p, hire, diffDays, status}) => `
-            <tr>
+          ${flagged.map(({u, p, hire, diffDays, status}) => {
+            const manager = p.manager || p.managerId || '—';
+            return `<tr>
               <td style="font-weight:600">${esc((p.firstName||'')+' '+(p.lastName||'')).trim()}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.email||u.email||'')}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.department||'—')}</td>
+              <td style="color:#94a3b8;font-size:13px">${esc(manager)}</td>
               <td style="font-size:13px">${hire.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}</td>
               <td style="color:#f87171;font-size:12px;font-weight:600">${daysLabel(diffDays, false)}</td>
               <td>${statusPill(status)}</td>
-            </tr>`).join('')}
+            </tr>`;}).join('')}
           </tbody>
         </table>
         </div>
