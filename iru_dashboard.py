@@ -1385,7 +1385,7 @@ HTML = """<!DOCTYPE html>
     <button class="tab" onclick="switchTab('users', this)">👥 Users</button>
     <button class="tab" onclick="switchTab('departments', this)">🏢 By Department</button>
     <button class="tab" onclick="switchTab('orphaned', this)">🚨 Pending Returns</button>
-    <button class="tab" onclick="switchTab('admin', this)" style="margin-left:auto">🔐 Admin</button>
+    <button class="tab" id="adminTabBtn" onclick="switchTab('admin', this)" style="margin-left:auto">🔐 Admin</button>
   </div>
 
   <!-- ── Tab: Overview ── -->
@@ -3466,7 +3466,7 @@ HTML = """<!DOCTYPE html>
       currentUser = await r.json();
     } catch(e) { /* ignore */ }
     // Show/hide Admin tab based on admin status
-    const adminTab = document.querySelector('.tab[onclick*="\'admin\'"]');
+    const adminTab = document.getElementById('adminTabBtn');
     if (adminTab) adminTab.style.display = currentUser.is_admin ? '' : 'none';
   }
   initSession().then(() => { fetchAll(); startCachePolling(); });
