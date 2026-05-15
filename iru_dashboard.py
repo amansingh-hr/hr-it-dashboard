@@ -42,6 +42,16 @@ MAX_ACTIVITY      = 1000
 PORT              = int(os.environ.get("PORT", 8080))
 CACHE_TTL   = 15 * 60   # used for staleness checks; auto-refresh is disabled (refresh on login instead)
 
+# Onboarding roster spreadsheet (separate from the offboarding/users sheet)
+ONBOARDING_ROSTER_SHEET_ID = "10JdT1skrlPpyHMSxg_0P4BeroI0iIbFXgdO6SlCq37c"
+ONBOARDING_ROSTER_TAB      = "New Employee Roster (Imported: People Team)"
+ONBOARDING_CHECKLIST_FIELDS = [
+    "Equipment Tracking",
+    "Welcome Email (IT & People Team)",
+    "IT Equipment Tracking Email",
+    "Okta Activation Email",
+]
+
 # Cloud deployment: load API credentials from environment variables
 # Local development:  falls back to iru_config.json
 def _config_from_env():
@@ -476,6 +486,125 @@ def _sheets_restore(cfg):
 
     except Exception as exc:
         print(f"[Sheets restore error] {exc}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Onboarding Checklist — reads from separate Google Sheet (transposed layout)
+# ---------------------------------------------------------------------------
+
+def _onboarding_checklist_read(email, cfg=None):
+    """Return checklist status for one employee from the onboarding roster sheet.
+
+    The sheet is TRANSPOSED: each employee is a COLUMN; each task is a ROW.
+    We scan every cell to locate the employee by email, then find each
+    checklist-field row by matching the field name against the first few columns.
+    """
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or (cfg or {}).get("google_service_account_json", "")
+    if not sa_json:
+        return {"error": "No Google service account configured"}
+
+    try:
+        service = _get_sheets_service(sa_json)
+        result  = service.spreadsheets().values().get(
+            spreadsheetId=ONBOARDING_ROSTER_SHEET_ID,
+            range=f"'{ONBOARDING_ROSTER_TAB}'",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute()
+        rows = result.get("values", [])
+    except Exception as exc:
+        return {"error": f"Sheet read failed: {exc}"}
+
+    if not rows:
+        return {"error": "Onboarding sheet is empty"}
+
+    email_lower = email.strip().lower()
+
+    # ── Step 1: find the column index for this employee (match by email) ──────
+    employee_col = None
+    for r_idx, row in enumerate(rows):
+        for c_idx, cell in enumerate(row):
+            if isinstance(cell, str) and cell.strip().lower() == email_lower:
+                employee_col = c_idx
+                break
+        if employee_col is not None:
+            break
+
+    if employee_col is None:
+        return {"error": f"Employee not found in onboarding sheet", "fields": {}}
+
+    # ── Step 2: find the row index for each checklist field (match row label) ──
+    field_rows = {}   # field_name → row_index
+    for r_idx, row in enumerate(rows):
+        for c_idx in range(min(3, len(row))):   # task labels are in first 3 cols
+            cell = str(row[c_idx]).strip()
+            for field in ONBOARDING_CHECKLIST_FIELDS:
+                if field not in field_rows and field.lower() in cell.lower():
+                    field_rows[field] = r_idx
+
+    # ── Step 3: build result ──────────────────────────────────────────────────
+    fields = {}
+    for field in ONBOARDING_CHECKLIST_FIELDS:
+        if field in field_rows:
+            r_idx = field_rows[field]
+            row   = rows[r_idx] if r_idx < len(rows) else []
+            raw   = row[employee_col] if employee_col < len(row) else ""
+            completed = raw == "✅" or str(raw).strip().upper() in ("TRUE", "YES", "1")
+            fields[field] = {
+                "completed": completed,
+                "raw":       raw,
+                "row":       r_idx,
+                "col":       employee_col,
+            }
+        else:
+            fields[field] = {"completed": False, "raw": "", "row": None, "col": employee_col}
+
+    return {"email": email, "fields": fields}
+
+
+def _onboarding_checklist_update(email, field, completed, cfg=None):
+    """Set a checklist cell for one employee in the onboarding roster sheet."""
+    if field not in ONBOARDING_CHECKLIST_FIELDS:
+        return {"ok": False, "error": "Unknown field"}
+
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or (cfg or {}).get("google_service_account_json", "")
+    if not sa_json:
+        return {"ok": False, "error": "No Google service account configured"}
+
+    # Read current layout to find the cell address
+    state = _onboarding_checklist_read(email, cfg)
+    if "error" in state and "fields" not in state:
+        return {"ok": False, "error": state["error"]}
+
+    fdata = state.get("fields", {}).get(field)
+    if not fdata or fdata.get("row") is None:
+        return {"ok": False, "error": f"Field '{field}' not found in sheet"}
+
+    row_idx = fdata["row"]  # 0-based
+    col_idx = fdata["col"]  # 0-based
+
+    # Convert to A1 notation (row is 1-based, col to letter)
+    def col_letter(n):
+        s = ""
+        n += 1  # 1-based
+        while n > 0:
+            n, r = divmod(n - 1, 26)
+            s = chr(65 + r) + s
+        return s
+
+    cell_ref = f"{col_letter(col_idx)}{row_idx + 1}"
+    new_value = "✅" if completed else ""
+
+    try:
+        service = _get_sheets_service(sa_json)
+        service.spreadsheets().values().update(
+            spreadsheetId=ONBOARDING_ROSTER_SHEET_ID,
+            range=f"'{ONBOARDING_ROSTER_TAB}'!{cell_ref}",
+            valueInputOption="RAW",
+            body={"values": [[new_value]]},
+        ).execute()
+        return {"ok": True, "cell": cell_ref, "value": new_value}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -1833,6 +1962,36 @@ HTML = """<!DOCTYPE html>
     <div>
       <h3 style="font-size:14px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;margin:0 0 14px">⚠️ Needs Attention</h3>
       <div id="onboardingFlagged"></div>
+    </div>
+  </div>
+
+  <!-- ── Onboarding Checklist Modal ── -->
+  <div id="onboardingChecklistOverlay"
+       onclick="if(event.target===this)closeOnboardingModal()"
+       style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1100;align-items:center;justify-content:center">
+    <div onclick="event.stopPropagation()"
+         style="background:#1e293b;border-radius:14px;width:520px;max-width:92vw;box-shadow:0 24px 60px rgba(0,0,0,.5);overflow:hidden">
+      <!-- Header -->
+      <div style="padding:20px 24px 16px;border-bottom:1px solid #2d3748;display:flex;align-items:flex-start;gap:14px">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:16px;font-weight:700;color:#e2e8f0;margin-bottom:2px" id="oclName"></div>
+          <div style="font-size:13px;color:#64748b" id="oclEmail"></div>
+        </div>
+        <button onclick="closeOnboardingModal()"
+                style="background:none;border:none;color:#475569;font-size:20px;cursor:pointer;padding:0;line-height:1;margin-top:2px">✕</button>
+      </div>
+      <!-- Body -->
+      <div style="padding:20px 24px">
+        <div style="font-size:12px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px">IT Onboarding Checklist</div>
+        <div id="oclItems" style="display:flex;flex-direction:column;gap:10px">
+          <div style="color:#64748b;font-size:13px;padding:20px;text-align:center">Loading…</div>
+        </div>
+        <div id="oclError" style="display:none;color:#f87171;font-size:13px;margin-top:10px;padding:10px;background:rgba(239,68,68,.1);border-radius:8px"></div>
+      </div>
+      <!-- Footer -->
+      <div style="padding:12px 24px 20px;display:flex;justify-content:flex-end">
+        <button class="btn btn-secondary" onclick="closeOnboardingModal()" style="font-size:13px;padding:7px 18px">Close</button>
+      </div>
     </div>
   </div>
 
@@ -3824,10 +3983,13 @@ HTML = """<!DOCTYPE html>
             const isToday = diffDays === 0;
             const isSoon  = hire <= endOfWeek && diffDays > 0;
             const rowBg   = isToday ? 'background:rgba(34,197,94,.07)' : isSoon ? 'background:rgba(245,158,11,.05)' : '';
-            const manager = p.manager || p.managerId || '—';
-            return `<tr style="${rowBg}">
-              <td style="font-weight:600">${esc((p.firstName||'')+' '+(p.lastName||'')).trim()}</td>
-              <td style="color:#94a3b8;font-size:13px">${esc(p.email||u.email||'')}</td>
+            const manager  = p.manager || p.managerId || '—';
+            const fullName = esc((p.firstName||'')+' '+(p.lastName||'')).trim();
+            const email    = esc(p.email||u.email||'');
+            return `<tr style="${rowBg};cursor:pointer" title="Click to view IT checklist"
+                        onclick="openOnboardingModal(${JSON.stringify(p.email||u.email||'')}, ${JSON.stringify((p.firstName||'')+' '+(p.lastName||''))})">
+              <td style="font-weight:600">${fullName}</td>
+              <td style="color:#94a3b8;font-size:13px">${email}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.department||'—')}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.title||'—')}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(manager)}</td>
@@ -3858,7 +4020,8 @@ HTML = """<!DOCTYPE html>
           <tbody>
           ${flagged.map(({u, p, hire, diffDays, status}) => {
             const manager = p.manager || p.managerId || '—';
-            return `<tr>
+            return `<tr style="cursor:pointer" title="Click to view IT checklist"
+                        onclick="openOnboardingModal(${JSON.stringify(p.email||u.email||'')}, ${JSON.stringify((p.firstName||'')+' '+(p.lastName||''))})">
               <td style="font-weight:600">${esc((p.firstName||'')+' '+(p.lastName||'')).trim()}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.email||u.email||'')}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.department||'—')}</td>
@@ -3876,6 +4039,115 @@ HTML = """<!DOCTYPE html>
           <b>Not Sent</b> means no activation email has been sent yet.
         </p>`;
     }
+  }
+
+  // ── Onboarding Checklist Modal ────────────────────────────────────────────
+  const OCL_FIELDS = [
+    "Equipment Tracking",
+    "Welcome Email (IT & People Team)",
+    "IT Equipment Tracking Email",
+    "Okta Activation Email",
+  ];
+
+  const OCL_ICONS = {
+    "Equipment Tracking":                 "💻",
+    "Welcome Email (IT & People Team)":   "📧",
+    "IT Equipment Tracking Email":        "📦",
+    "Okta Activation Email":              "🔑",
+  };
+
+  let _oclCurrentEmail = "";
+
+  async function openOnboardingModal(email, name) {
+    _oclCurrentEmail = email;
+    document.getElementById('oclName').textContent  = name.trim() || email;
+    document.getElementById('oclEmail').textContent = email;
+    document.getElementById('oclError').style.display = 'none';
+    document.getElementById('oclItems').innerHTML =
+      '<div style="color:#64748b;font-size:13px;padding:20px;text-align:center">Loading checklist…</div>';
+    document.getElementById('onboardingChecklistOverlay').style.display = 'flex';
+
+    try {
+      const res  = await fetch('/api/onboarding/checklist?email=' + encodeURIComponent(email));
+      const data = await res.json();
+      if (data.error && !data.fields) {
+        document.getElementById('oclItems').innerHTML = '';
+        const errEl = document.getElementById('oclError');
+        errEl.textContent = data.error;
+        errEl.style.display = 'block';
+        return;
+      }
+      renderOclItems(data.fields || {});
+    } catch(e) {
+      document.getElementById('oclItems').innerHTML = '';
+      const errEl = document.getElementById('oclError');
+      errEl.textContent = 'Failed to load checklist: ' + e.message;
+      errEl.style.display = 'block';
+    }
+  }
+
+  function renderOclItems(fields) {
+    const container = document.getElementById('oclItems');
+    const isAdmin   = currentUser.is_admin;
+    container.innerHTML = OCL_FIELDS.map(field => {
+      const fd        = fields[field] || {};
+      const done      = fd.completed || false;
+      const icon      = OCL_ICONS[field] || '☑';
+      const canToggle = isAdmin && fd.row !== null && fd.row !== undefined;
+      return `
+        <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;
+                    background:${done ? 'rgba(34,197,94,.08)' : 'rgba(30,41,59,.8)'};
+                    border:1px solid ${done ? 'rgba(34,197,94,.25)' : '#2d3748'};
+                    border-radius:10px;transition:background .15s">
+          <button onclick="toggleOclField(${JSON.stringify(field)}, ${!done})"
+                  title="${canToggle ? (done ? 'Mark incomplete' : 'Mark complete') : (isAdmin ? 'Field not found in sheet' : 'View only')}"
+                  ${!canToggle ? 'disabled' : ''}
+                  style="width:26px;height:26px;border-radius:50%;border:2px solid ${done ? '#4ade80' : '#475569'};
+                         background:${done ? '#4ade80' : 'transparent'};cursor:${canToggle ? 'pointer' : 'default'};
+                         display:flex;align-items:center;justify-content:center;flex-shrink:0;
+                         font-size:14px;line-height:1;padding:0;transition:all .15s">
+            ${done ? '✓' : ''}
+          </button>
+          <div style="font-size:14px">${icon}</div>
+          <div style="flex:1;font-size:14px;font-weight:${done ? '500' : '400'};color:${done ? '#e2e8f0' : '#94a3b8'};
+                      text-decoration:${done ? 'none' : 'none'}">
+            ${esc(field)}
+          </div>
+          <div style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;flex-shrink:0;
+                      background:${done ? 'rgba(34,197,94,.2)' : 'rgba(100,116,139,.15)'};
+                      color:${done ? '#4ade80' : '#64748b'}">
+            ${done ? 'Done' : 'Pending'}
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  async function toggleOclField(field, newCompleted) {
+    const email = _oclCurrentEmail;
+    if (!email) return;
+    try {
+      const res  = await fetch('/api/onboarding/checklist/update', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({email, field, completed: newCompleted}),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert('Update failed: ' + (data.error || 'Unknown error'));
+        return;
+      }
+      // Refresh from server to confirm
+      const r2   = await fetch('/api/onboarding/checklist?email=' + encodeURIComponent(email));
+      const d2   = await r2.json();
+      renderOclItems(d2.fields || {});
+    } catch(e) {
+      alert('Error: ' + e.message);
+    }
+  }
+
+  function closeOnboardingModal() {
+    document.getElementById('onboardingChecklistOverlay').style.display = 'none';
+    _oclCurrentEmail = "";
   }
 
   // ── Admin Tab ─────────────────────────────────────────────────────────────
@@ -4479,6 +4751,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 for u in users
             ])
 
+        elif self.path.startswith("/api/onboarding/checklist"):
+            from urllib.parse import urlparse, parse_qs
+            qs    = parse_qs(urlparse(self.path).query)
+            email = qs.get("email", [""])[0].strip()
+            if not email:
+                self._json_response({"error": "email parameter required"}, status=400)
+                return
+            data = _onboarding_checklist_read(email, self._cfg())
+            self._json_response(data)
+
         else:
             self.send_error(404)
 
@@ -4717,6 +4999,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _users_sheets_sync_bg(DashboardHandler.config or {})
             _log_activity(self._actor(), "Changed password for user", target=target, cfg=self._cfg())
             self._json_response({"ok": True})
+
+        elif self.path == "/api/onboarding/checklist/update":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length).decode())
+            email     = body.get("email", "").strip()
+            field     = body.get("field", "").strip()
+            completed = bool(body.get("completed", False))
+            if not email or not field:
+                self._json_response({"ok": False, "error": "email and field required"}, status=400)
+                return
+            result = _onboarding_checklist_update(email, field, completed, self._cfg())
+            if result.get("ok"):
+                _log_activity(
+                    self._actor(),
+                    f"Onboarding checklist: {field}",
+                    target=email,
+                    detail="✅ Completed" if completed else "☐ Cleared",
+                    cfg=self._cfg(),
+                )
+            self._json_response(result)
 
         elif self.path == "/api/change-password":
             token = self._get_cookie("session")
