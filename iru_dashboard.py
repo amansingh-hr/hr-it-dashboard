@@ -4398,17 +4398,16 @@ HTML = """<!DOCTYPE html>
                </a>`
             : `<span style="color:#475569;font-style:italic">Not created</span>`;
         } else if (label === 'Manager Form') {
+          // Truncate long form text; if it's a URL show as link
           if (url) {
             valueHtml = `<a href="${esc(url)}" target="_blank" rel="noopener"
                             style="color:#60a5fa;text-decoration:none">View form ↗</a>`;
-          } else if (val) {
-            // Split on any line ending (\r\n, \n, \r), preserve all lines
-            const lines = val.split(/\r\n|\n|\r/).map(l => esc(l)).filter(l => l.trim());
-            valueHtml = `<div style="font-size:12px;color:#cbd5e1;line-height:1.8;display:flex;flex-direction:column;gap:1px">
-              ${lines.map(l => `<span>${l}</span>`).join('')}
-            </div>`;
+          } else if (val.length > 120) {
+            valueHtml = `<span style="color:#cbd5e1;font-size:12px;line-height:1.5">${esc(val.slice(0,120))}…</span>`;
           } else {
-            valueHtml = `<span style="color:#475569;font-style:italic">—</span>`;
+            valueHtml = empty
+              ? `<span style="color:#475569;font-style:italic">—</span>`
+              : `<span style="color:#cbd5e1;font-size:12px">${esc(val)}</span>`;
           }
         } else {
           valueHtml = empty
@@ -4416,25 +4415,13 @@ HTML = """<!DOCTYPE html>
             : `<span style="color:#e2e8f0">${esc(val)}</span>`;
         }
 
-        if (label === 'Manager Form') {
-          // Always use expanded block layout for Manager Form
-          html += `
-            <div style="padding:8px 12px;background:#161b27;border-radius:8px;margin-bottom:4px">
-              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                <span style="font-size:14px">${icon}</span>
-                <span style="font-size:12px;color:#64748b;font-weight:600">${esc(label)}</span>
-              </div>
-              <div style="padding-left:4px">${valueHtml}</div>
-            </div>`;
-        } else {
-          html += `
-            <div style="display:flex;align-items:baseline;gap:10px;padding:8px 12px;
-                        background:#161b27;border-radius:8px;margin-bottom:4px">
-              <span style="font-size:14px;flex-shrink:0;width:20px;text-align:center">${icon}</span>
-              <span style="font-size:12px;color:#64748b;width:120px;flex-shrink:0">${esc(label)}</span>
-              <span style="flex:1;font-size:13px;word-break:break-word">${valueHtml}</span>
-            </div>`;
-        }
+        html += `
+          <div style="display:flex;align-items:baseline;gap:10px;padding:8px 12px;
+                      background:#161b27;border-radius:8px;margin-bottom:4px">
+            <span style="font-size:14px;flex-shrink:0;width:20px;text-align:center">${icon}</span>
+            <span style="font-size:12px;color:#64748b;width:120px;flex-shrink:0">${esc(label)}</span>
+            <span style="flex:1;font-size:13px;word-break:break-word">${valueHtml}</span>
+          </div>`;
       }
     }
 
