@@ -1100,8 +1100,7 @@ LOGIN_HTML = """<!DOCTYPE html>
   .card{background:#1e293b;border:1px solid #334155;border-radius:16px;
         padding:48px 40px;width:100%;max-width:400px;box-shadow:0 25px 50px rgba(0,0,0,.5)}
   .logo{display:flex;align-items:center;gap:14px;margin-bottom:32px}
-  .logo-icon{width:48px;height:48px;background:#eb4534;border-radius:12px;
-              display:flex;align-items:center;justify-content:center;font-size:24px}
+  .logo-icon{width:80px;height:42px;display:flex;align-items:center;justify-content:center}
   .logo-text h1{font-size:20px;font-weight:700;color:#f1f5f9}
   .logo-text p{font-size:13px;color:#64748b;margin-top:2px}
   label{display:block;font-size:13px;font-weight:500;color:#94a3b8;margin-bottom:6px}
@@ -1118,7 +1117,15 @@ LOGIN_HTML = """<!DOCTYPE html>
 <body>
 <div class="card">
   <div class="logo">
-    <div class="logo-icon">🖥</div>
+    <div class="logo-icon">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 105" width="80" height="42">
+        <path d="M 0,105 A 100,100 0 0,1 200,105 L 156,105 A 56,56 0 0,0 44,105 Z" fill="#E8423A"/>
+        <defs><path id="lta" d="M 22,105 A 78,78 0 0,1 178,105"/></defs>
+        <text fill="white" font-family="Arial Black,Arial,sans-serif" font-weight="900" font-size="20" letter-spacing="1.5">
+          <textPath href="#lta" startOffset="50%" text-anchor="middle">HUNGRYROOT</textPath>
+        </text>
+      </svg>
+    </div>
     <div class="logo-text">
       <h1>Hungryroot IT Dashboard</h1>
       <p>Hungryroot · IT Device Management</p>
@@ -1154,8 +1161,7 @@ HTML = """<!DOCTYPE html>
   /* ── Header ── */
   .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
   .logo{display:flex;align-items:center;gap:14px}
-  .logo-icon{width:44px;height:44px;background:linear-gradient(135deg,#f38020,#c44f00);
-    border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px}
+  .logo-icon{width:76px;height:40px;display:flex;align-items:center;justify-content:center}
   h1{font-size:22px;font-weight:700;letter-spacing:-0.3px}
   .subtitle{color:#64748b;font-size:13px;margin-top:3px}
   .header-right{display:flex;align-items:center;gap:14px}
@@ -1474,7 +1480,15 @@ HTML = """<!DOCTYPE html>
 <!-- ── Header ─────────────────────────────────────────────── -->
 <div class="header">
   <div class="logo">
-    <div class="logo-icon">🖥️</div>
+    <div class="logo-icon">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 105" width="76" height="40">
+        <path d="M 0,105 A 100,100 0 0,1 200,105 L 156,105 A 56,56 0 0,0 44,105 Z" fill="#E8423A"/>
+        <defs><path id="hta" d="M 22,105 A 78,78 0 0,1 178,105"/></defs>
+        <text fill="white" font-family="Arial Black,Arial,sans-serif" font-weight="900" font-size="20" letter-spacing="1.5">
+          <textPath href="#hta" startOffset="50%" text-anchor="middle">HUNGRYROOT</textPath>
+        </text>
+      </svg>
+    </div>
     <div>
       <h1>Hungryroot IT Dashboard</h1>
       <div class="subtitle">Hungryroot · IT Device Management</div>
