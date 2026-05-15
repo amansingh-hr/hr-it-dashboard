@@ -341,16 +341,35 @@ def _get_dashboard_creds():
 def _init_users():
     """On first run: migrate from single-user config to new multi-user users file."""
     if os.path.exists(USERS_FILE):
+        # Backfill is_admin=True on the first user if the field is missing
+        users = _load_users()
+        changed = False
+        for i, u in enumerate(users):
+            if "is_admin" not in u:
+                u["is_admin"] = (i == 0)
+                changed = True
+        if changed:
+            _save_users(users)
         return
     u_old, p_old = _get_dashboard_creds()
     if p_old:
         users = [{
-            "username":     u_old,
+            "username":      u_old,
             "password_hash": _hash_password(p_old),
-            "created_at":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "is_admin":      True,
+            "created_at":    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }]
         _save_users(users)
         print(f"[Auth] Migrated user '{u_old}' to dashboard_users.json")
+
+
+def _is_admin(username):
+    """Return True if the given username has admin privileges."""
+    users = _load_users()
+    for u in users:
+        if u["username"] == username:
+            return bool(u.get("is_admin", False))
+    return False
 
 
 def _create_session(username):
@@ -3440,12 +3459,28 @@ HTML = """<!DOCTYPE html>
   }
 
   // Boot
-  fetchAll();
-  startCachePolling();
+  let currentUser = {username:'', is_admin:false};
+  async function initSession() {
+    try {
+      const r = await fetch('/api/me');
+      currentUser = await r.json();
+    } catch(e) { /* ignore */ }
+    // Show/hide Admin tab based on admin status
+    const adminTab = document.querySelector('.tab[onclick*="\'admin\'"]');
+    if (adminTab) adminTab.style.display = currentUser.is_admin ? '' : 'none';
+  }
+  initSession().then(() => { fetchAll(); startCachePolling(); });
 
   // ── Admin Tab ─────────────────────────────────────────────────────────────
   async function loadAdminTab() {
     const wrap = document.getElementById('adminUsersWrap');
+    const addSection = document.getElementById('adminAddSection');
+    if (!currentUser.is_admin) {
+      wrap.innerHTML = '<div style="color:#94a3b8;padding:20px;text-align:center;border:1px solid #1e293b;border-radius:10px">🔒 You need admin privileges to manage users.</div>';
+      if (addSection) addSection.style.display = 'none';
+      return;
+    }
+    if (addSection) addSection.style.display = '';
     wrap.innerHTML = '<div style="color:#64748b;padding:20px">Loading...</div>';
     try {
       const res  = await fetch('/api/admin/users');
@@ -3455,22 +3490,33 @@ HTML = """<!DOCTYPE html>
         return;
       }
       wrap.innerHTML = `
-        <table class="data-table" style="width:100%;max-width:600px">
+        <table class="data-table" style="width:100%;max-width:700px">
           <thead><tr>
             <th>Username</th>
+            <th>Role</th>
             <th>Created</th>
-            <th style="width:220px">Actions</th>
+            <th style="width:260px">Actions</th>
           </tr></thead>
           <tbody>
           ${users.map(u => `
             <tr>
               <td style="font-weight:500">${esc(u.username)}${u.is_me ? ' <span style="font-size:11px;color:#64748b">(you)</span>' : ''}</td>
+              <td>
+                <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;
+                  background:${u.is_admin ? 'rgba(59,130,246,.2)' : 'rgba(100,116,139,.15)'};
+                  color:${u.is_admin ? '#60a5fa' : '#94a3b8'}">
+                  ${u.is_admin ? '🔐 Admin' : '👁 Viewer'}
+                </span>
+              </td>
               <td style="color:#64748b;font-size:13px">${u.created_at ? u.created_at.slice(0,10) : '—'}</td>
-              <td style="display:flex;gap:6px">
+              <td style="display:flex;gap:6px;flex-wrap:wrap">
                 <button class="btn btn-secondary" style="font-size:12px;padding:4px 10px"
                   onclick="adminChangePass('${esc(u.username)}')">Change Password</button>
-                ${u.is_me ? '' : `<button class="btn" style="font-size:12px;padding:4px 10px;background:#ef4444;color:#fff"
-                  onclick="adminDeleteUser('${esc(u.username)}')">Remove</button>`}
+                ${u.is_me ? '' : `
+                  <button class="btn btn-secondary" style="font-size:12px;padding:4px 10px;background:${u.is_admin ? 'rgba(245,158,11,.15)' : 'rgba(59,130,246,.15)'};color:${u.is_admin ? '#f59e0b' : '#60a5fa'};border-color:${u.is_admin ? '#f59e0b' : '#3b82f6'}"
+                    onclick="adminToggleAdmin('${esc(u.username)}', ${u.is_admin})">${u.is_admin ? 'Remove Admin' : 'Make Admin'}</button>
+                  <button class="btn" style="font-size:12px;padding:4px 10px;background:#ef4444;color:#fff"
+                    onclick="adminDeleteUser('${esc(u.username)}')">Remove</button>`}
               </td>
             </tr>`).join('')}
           </tbody>
@@ -3497,6 +3543,15 @@ HTML = """<!DOCTYPE html>
     } else {
       msg.style.color='#f87171'; msg.textContent = data.error || 'Error adding user.';
     }
+  }
+
+  async function adminToggleAdmin(username, currentlyAdmin) {
+    const action = currentlyAdmin ? 'remove admin from' : 'make admin';
+    if (!confirm(`Are you sure you want to ${action} '${username}'?`)) return;
+    const res  = await fetch('/api/admin/users/toggle-admin', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username})});
+    const data = await res.json();
+    if (data.ok) { loadAdminTab(); }
+    else { alert(data.error || 'Error updating role.'); }
   }
 
   async function adminDeleteUser(username) {
@@ -3532,7 +3587,7 @@ HTML = """<!DOCTYPE html>
 
   <div id="adminUsersWrap" style="margin-bottom:32px"></div>
 
-  <div style="background:#1e293b;border-radius:10px;padding:20px;max-width:500px">
+  <div id="adminAddSection" style="background:#1e293b;border-radius:10px;padding:20px;max-width:500px">
     <div style="font-size:14px;font-weight:600;margin-bottom:14px">Add New User</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
       <div>
@@ -3595,6 +3650,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         token = self._get_cookie("session")
         if not _valid_session(token):
             self._redirect("/login")
+            return True
+        return False
+
+    def _require_admin(self):
+        """Return True (and send 403) if the caller is not an admin."""
+        token = self._get_cookie("session")
+        username = _get_session_username(token)
+        if not username or not _is_admin(username):
+            self._json_response({"ok": False, "error": "Admin privileges required."}, status=403)
             return True
         return False
 
@@ -3796,12 +3860,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             data = _load_offboarding()
             self._json_response(data.get(email, {}))
 
+        elif self.path == "/api/me":
+            token = self._get_cookie("session")
+            me = _get_session_username(token)
+            self._json_response({"username": me or "", "is_admin": _is_admin(me) if me else False})
+
         elif self.path == "/api/admin/users":
             token = self._get_cookie("session")
             me = _get_session_username(token)
             users = _load_users()
             self._json_response([
-                {"username": u["username"], "created_at": u.get("created_at",""), "is_me": u["username"] == me}
+                {
+                    "username":   u["username"],
+                    "created_at": u.get("created_at", ""),
+                    "is_me":      u["username"] == me,
+                    "is_admin":   bool(u.get("is_admin", False)),
+                }
                 for u in users
             ])
 
@@ -3915,6 +3989,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json_response({"ok": True})
 
         elif self.path == "/api/admin/users/add":
+            if self._require_admin(): return
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
             new_user = body.get("username", "").strip()
@@ -3930,14 +4005,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_response({"ok": False, "error": f"User '{new_user}' already exists."})
                 return
             users.append({
-                "username":     new_user,
+                "username":      new_user,
                 "password_hash": _hash_password(new_pass),
-                "created_at":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "is_admin":      False,
+                "created_at":    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             })
             _save_users(users)
             self._json_response({"ok": True})
 
         elif self.path == "/api/admin/users/delete":
+            if self._require_admin(): return
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
             target = body.get("username", "").strip()
@@ -3957,7 +4034,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _save_users(updated)
             self._json_response({"ok": True})
 
+        elif self.path == "/api/admin/users/toggle-admin":
+            if self._require_admin(): return
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            target = body.get("username", "").strip()
+            token  = self._get_cookie("session")
+            me     = _get_session_username(token)
+            if target == me:
+                self._json_response({"ok": False, "error": "You cannot change your own admin status."})
+                return
+            users = _load_users()
+            found = False
+            for u in users:
+                if u["username"] == target:
+                    u["is_admin"] = not bool(u.get("is_admin", False))
+                    found = True
+                    break
+            if not found:
+                self._json_response({"ok": False, "error": "User not found."})
+                return
+            _save_users(users)
+            self._json_response({"ok": True})
+
         elif self.path == "/api/admin/users/password":
+            if self._require_admin(): return
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
             target   = body.get("username", "").strip()
@@ -3990,9 +4091,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
-    def _json_response(self, data):
+    def _json_response(self, data, status=200):
         encoded = json.dumps(data).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", len(encoded))
         self.end_headers()
