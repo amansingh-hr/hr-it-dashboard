@@ -3621,13 +3621,15 @@ HTML = """<!DOCTYPE html>
               </td>
               <td style="color:#64748b;font-size:13px">${u.created_at ? u.created_at.slice(0,10) : '—'}</td>
               <td style="display:flex;gap:6px;flex-wrap:wrap">
-                <button class="btn btn-secondary" style="font-size:12px;padding:4px 10px"
-                  onclick="adminChangePass('${esc(u.username)}')">Change Password</button>
-                ${u.is_me ? '' : `
-                  <button class="btn btn-secondary" style="font-size:12px;padding:4px 10px;background:${u.is_admin ? 'rgba(245,158,11,.15)' : 'rgba(59,130,246,.15)'};color:${u.is_admin ? '#f59e0b' : '#60a5fa'};border-color:${u.is_admin ? '#f59e0b' : '#3b82f6'}"
-                    onclick="adminToggleAdmin('${esc(u.username)}', ${u.is_admin})">${u.is_admin ? 'Remove Admin' : 'Make Admin'}</button>
-                  <button class="btn" style="font-size:12px;padding:4px 10px;background:#ef4444;color:#fff"
-                    onclick="adminDeleteUser('${esc(u.username)}')">Remove</button>`}
+                ${u.is_me
+                  ? `<button class="btn btn-secondary" style="font-size:12px;padding:4px 10px"
+                      onclick="adminChangePass('${esc(u.username)}')">Change Password</button>`
+                  : `<button class="btn btn-secondary" style="font-size:12px;padding:4px 10px"
+                      onclick="adminResetPass('${esc(u.username)}')">Reset Password</button>
+                    <button class="btn btn-secondary" style="font-size:12px;padding:4px 10px;background:${u.is_admin ? 'rgba(245,158,11,.15)' : 'rgba(59,130,246,.15)'};color:${u.is_admin ? '#f59e0b' : '#60a5fa'};border-color:${u.is_admin ? '#f59e0b' : '#3b82f6'}"
+                      onclick="adminToggleAdmin('${esc(u.username)}', ${u.is_admin})">${u.is_admin ? 'Remove Admin' : 'Make Admin'}</button>
+                    <button class="btn" style="font-size:12px;padding:4px 10px;background:#ef4444;color:#fff"
+                      onclick="adminDeleteUser('${esc(u.username)}')">Remove</button>`}
               </td>
             </tr>`).join('')}
           </tbody>
@@ -3710,6 +3712,25 @@ HTML = """<!DOCTYPE html>
     const data = await res.json();
     if (data.ok) { loadAdminTab(); }
     else { alert(data.error || 'Error removing user.'); }
+  }
+
+  async function adminResetPass(username) {
+    if (!confirm(`Reset password for '${username}'? A new temporary password will be generated.`)) return;
+    const res  = await fetch('/api/admin/users/reset-password', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username})});
+    const data = await res.json();
+    if (data.ok) {
+      // Reuse the Add User modal step 2 to display the temp password
+      document.getElementById('addUserStep1').style.display = 'none';
+      document.getElementById('addUserResultEmail').textContent = username;
+      document.getElementById('addUserResultPass').textContent  = data.temp_password;
+      document.getElementById('addUserStep2').style.display = '';
+      // Tweak the heading for reset context
+      document.querySelector('#addUserStep2 h3').textContent = 'Password Reset';
+      document.querySelector('#addUserStep2 p').textContent  = 'Share this temporary password with the user. They will be prompted to set a new password on next login.';
+      document.getElementById('addUserModal').style.display = 'flex';
+    } else {
+      alert(data.error || 'Error resetting password.');
+    }
   }
 
   async function adminChangePass(username) {
@@ -4263,6 +4284,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _save_users(users)
             _users_sheets_sync_bg(DashboardHandler.config or {})
             self._json_response({"ok": True})
+
+        elif self.path == "/api/admin/users/reset-password":
+            if self._require_admin(): return
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            target = body.get("username", "").strip()
+            token  = self._get_cookie("session")
+            me     = _get_session_username(token)
+            if target == me:
+                self._json_response({"ok": False, "error": "Use Change Password to update your own password."})
+                return
+            users = _load_users()
+            found = False
+            temp_pass = _generate_temp_password()
+            for u in users:
+                if u["username"] == target:
+                    u["password_hash"]        = _hash_password(temp_pass)
+                    u["must_change_password"] = True
+                    found = True
+                    break
+            if not found:
+                self._json_response({"ok": False, "error": "User not found."})
+                return
+            _save_users(users)
+            _users_sheets_sync_bg(DashboardHandler.config or {})
+            self._json_response({"ok": True, "temp_password": temp_pass})
 
         elif self.path == "/api/admin/users/password":
             if self._require_admin(): return
