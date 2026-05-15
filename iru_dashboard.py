@@ -4237,10 +4237,10 @@ HTML = """<!DOCTYPE html>
         <table class="data-table" style="width:100%">
           <thead><tr>
             <th>Name</th><th>Email</th><th>Department</th><th>Title</th><th>Manager</th>
-            <th>Start Date</th><th style="text-align:center">Equipment</th>
-            <th style="text-align:center">Welcome Email</th>
-            <th style="text-align:center">Tracking Email</th>
-            <th>Activation Email</th>
+            <th>Start Date</th><th style="text-align:center;width:60px">Equip.</th>
+            <th style="text-align:center;width:70px">Welcome</th>
+            <th style="text-align:center;width:70px">Tracking</th>
+            <th style="text-align:center;width:70px">Activation</th>
           </tr></thead>
           <tbody>
           ${upcoming.map(({u, p, hire, diffDays, status}) => {
@@ -4265,7 +4265,7 @@ HTML = """<!DOCTYPE html>
               <td style="text-align:center">${equipCell(cl['Equipment Tracking'])}</td>
               <td style="text-align:center">${chkCell((cl['Welcome Email (IT & People Team)']||{}).completed)}</td>
               <td style="text-align:center">${chkCell((cl['IT Equipment Tracking Email']||{}).completed)}</td>
-              <td>${statusPill(status)}</td>
+              <td style="text-align:center">${statusPill(status)}</td>
             </tr>`;
           }).join('')}
           </tbody>
@@ -4282,10 +4282,10 @@ HTML = """<!DOCTYPE html>
           <thead><tr>
             <th>Name</th><th>Email</th><th>Department</th><th>Manager</th>
             <th>Start Date</th><th>Overdue</th>
-            <th style="text-align:center">Equipment</th>
-            <th style="text-align:center">Welcome Email</th>
-            <th style="text-align:center">Tracking Email</th>
-            <th>Activation Email</th>
+            <th style="text-align:center;width:60px">Equip.</th>
+            <th style="text-align:center;width:70px">Welcome</th>
+            <th style="text-align:center;width:70px">Tracking</th>
+            <th style="text-align:center;width:70px">Activation</th>
           </tr></thead>
           <tbody>
           ${flagged.map(({u, p, hire, diffDays, status}) => {
@@ -4305,7 +4305,7 @@ HTML = """<!DOCTYPE html>
               <td style="text-align:center">${equipCell(cl['Equipment Tracking'])}</td>
               <td style="text-align:center">${chkCell((cl['Welcome Email (IT & People Team)']||{}).completed)}</td>
               <td style="text-align:center">${chkCell((cl['IT Equipment Tracking Email']||{}).completed)}</td>
-              <td>${statusPill(status)}</td>
+              <td style="text-align:center">${statusPill(status)}</td>
             </tr>`;}).join('')}
           </tbody>
         </table>
