@@ -14,7 +14,10 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
+import secrets
+import string
 import subprocess
 import sys
 import threading
@@ -131,6 +134,123 @@ def _save_offboarding(data):
 # ---------------------------------------------------------------------------
 # Google Sheets sync
 # ---------------------------------------------------------------------------
+def _generate_temp_password(length=12):
+    """Generate a random temporary password with mixed chars."""
+    alphabet = string.ascii_letters + string.digits
+    core = (
+        secrets.choice(string.ascii_uppercase) +
+        secrets.choice(string.ascii_lowercase) +
+        secrets.choice(string.digits) +
+        ''.join(secrets.choice(alphabet) for _ in range(length - 3))
+    )
+    lst = list(core)
+    random.shuffle(lst)
+    return ''.join(lst)
+
+
+def _get_sheets_service(sa_json):
+    """Build and return an authenticated Google Sheets service."""
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+    creds = Credentials.from_service_account_info(
+        json.loads(sa_json),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+
+def _ensure_sheet_tab(service, sheet_id, title):
+    """Create a sheet tab by title if it doesn't already exist."""
+    meta = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+    existing = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    if title not in existing:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": title}}}]},
+        ).execute()
+
+
+# ---------------------------------------------------------------------------
+# Google Sheets — Users
+# ---------------------------------------------------------------------------
+_USERS_SHEET_HEADERS = ["Username", "Password Hash", "Is Admin", "Must Change Password", "Created At"]
+
+
+def _users_sheets_sync(cfg=None):
+    """Full rewrite of the 'Users' sheet tab with current user list."""
+    try:
+        sa_json  = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or (cfg or {}).get("google_service_account_json", "")
+        sheet_id = os.environ.get("GOOGLE_SHEET_ID")             or (cfg or {}).get("google_sheet_id", "")
+        if not sa_json or not sheet_id:
+            return
+        service = _get_sheets_service(sa_json)
+        _ensure_sheet_tab(service, sheet_id, "Users")
+        users = _load_users()
+        rows = [_USERS_SHEET_HEADERS] + [
+            [
+                u["username"],
+                u["password_hash"],
+                "Yes" if u.get("is_admin") else "No",
+                "Yes" if u.get("must_change_password") else "No",
+                u.get("created_at", ""),
+            ]
+            for u in users
+        ]
+        api = service.spreadsheets().values()
+        api.clear(spreadsheetId=sheet_id, range="Users!A:E").execute()
+        api.update(
+            spreadsheetId=sheet_id, range="Users!A1",
+            valueInputOption="RAW", body={"values": rows},
+        ).execute()
+    except Exception as exc:
+        print(f"[Users sheet sync error] {exc}", flush=True)
+
+
+def _users_sheets_sync_bg(cfg=None):
+    threading.Thread(target=_users_sheets_sync, args=(cfg,), daemon=True).start()
+
+
+def _users_sheets_restore(cfg):
+    """On startup: restore users from the 'Users' Google Sheet tab."""
+    sa_json  = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or cfg.get("google_service_account_json", "")
+    sheet_id = os.environ.get("GOOGLE_SHEET_ID")             or cfg.get("google_sheet_id", "")
+    if not sa_json or not sheet_id:
+        return
+    try:
+        service = _get_sheets_service(sa_json)
+        meta = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        existing = [s["properties"]["title"] for s in meta.get("sheets", [])]
+        if "Users" not in existing:
+            return  # no Users tab yet — first run
+        rows = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range="Users!A:E"
+        ).execute().get("values", [])
+        if len(rows) < 2:
+            return
+        users = []
+        for row in rows[1:]:
+            if not row:
+                continue
+            username = (row[0] if len(row) > 0 else "").strip()
+            if not username:
+                continue
+            users.append({
+                "username":             username,
+                "password_hash":        row[1] if len(row) > 1 else "",
+                "is_admin":             (row[2] if len(row) > 2 else "") == "Yes",
+                "must_change_password": (row[3] if len(row) > 3 else "") == "Yes",
+                "created_at":           row[4] if len(row) > 4 else "",
+            })
+        if users:
+            _save_users(users)
+            print(f"[Sheets] Restored {len(users)} user(s) from Google Sheet.", flush=True)
+    except Exception as exc:
+        print(f"[Users sheet restore error] {exc}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Google Sheets — Offboarding
+# ---------------------------------------------------------------------------
 _SHEETS_HEADERS = [
     "Email", "Slack Deactivated", "Google Deactivated", "Box Shipped",
     "Outbound Tracking", "Equipment Returned", "Return Tracking",
@@ -146,14 +266,7 @@ def _sheets_sync(email, rec):
         if not sa_json or not sheet_id:
             return
 
-        from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-
-        creds   = Credentials.from_service_account_info(
-            json.loads(sa_json),
-            scopes=["https://www.googleapis.com/auth/spreadsheets"],
-        )
-        service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+        service = _get_sheets_service(sa_json)
         api     = service.spreadsheets().values()
 
         def yn(v): return "Yes" if v else "No"
@@ -220,14 +333,7 @@ def _sheets_restore(cfg):
         return
 
     try:
-        from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-
-        creds   = Credentials.from_service_account_info(
-            json.loads(sa_json),
-            scopes=["https://www.googleapis.com/auth/spreadsheets"],
-        )
-        service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+        service = _get_sheets_service(sa_json)
         rows    = service.spreadsheets().values().get(
             spreadsheetId=sheet_id, range="A:J"
         ).execute().get("values", [])
@@ -3459,7 +3565,7 @@ HTML = """<!DOCTYPE html>
   }
 
   // Boot
-  let currentUser = {username:'', is_admin:false};
+  let currentUser = {username:'', is_admin:false, must_change_password:false};
   async function initSession() {
     try {
       const r = await fetch('/api/me');
@@ -3468,19 +3574,24 @@ HTML = """<!DOCTYPE html>
     // Show/hide Admin tab based on admin status
     const adminTab = document.getElementById('adminTabBtn');
     if (adminTab) adminTab.style.display = currentUser.is_admin ? '' : 'none';
+    // Force password change if needed
+    if (currentUser.must_change_password) {
+      const overlay = document.getElementById('changePassOverlay');
+      if (overlay) { overlay.style.display = 'flex'; }
+    }
   }
   initSession().then(() => { fetchAll(); startCachePolling(); });
 
   // ── Admin Tab ─────────────────────────────────────────────────────────────
   async function loadAdminTab() {
     const wrap = document.getElementById('adminUsersWrap');
-    const addSection = document.getElementById('adminAddSection');
+    const addBtn = document.getElementById('adminAddBtn');
     if (!currentUser.is_admin) {
       wrap.innerHTML = '<div style="color:#94a3b8;padding:20px;text-align:center;border:1px solid #1e293b;border-radius:10px">🔒 You need admin privileges to manage users.</div>';
-      if (addSection) addSection.style.display = 'none';
+      if (addBtn) addBtn.style.display = 'none';
       return;
     }
-    if (addSection) addSection.style.display = '';
+    if (addBtn) addBtn.style.display = '';
     wrap.innerHTML = '<div style="color:#64748b;padding:20px">Loading...</div>';
     try {
       const res  = await fetch('/api/admin/users');
@@ -3526,22 +3637,61 @@ HTML = """<!DOCTYPE html>
     }
   }
 
-  async function adminAddUser() {
-    const username = document.getElementById('adminNewUser').value.trim();
-    const password = document.getElementById('adminNewPass').value.trim();
-    const msg = document.getElementById('adminMsg');
-    msg.textContent = '';
-    if (!username || !password) { msg.style.color='#f87171'; msg.textContent='Username and password are required.'; return; }
-    if (password.length < 8)    { msg.style.color='#f87171'; msg.textContent='Password must be at least 8 characters.'; return; }
-    const res  = await fetch('/api/admin/users/add', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username, password})});
+  function openAddUserModal() {
+    document.getElementById('addUserStep1').style.display = '';
+    document.getElementById('addUserStep2').style.display = 'none';
+    document.getElementById('addUserEmail').value = '';
+    document.getElementById('addUserError').textContent = '';
+    document.getElementById('addUserModal').style.display = 'flex';
+    setTimeout(() => document.getElementById('addUserEmail').focus(), 50);
+  }
+
+  function closeAddUserModal() {
+    document.getElementById('addUserModal').style.display = 'none';
+    loadAdminTab();
+  }
+
+  async function submitAddUser() {
+    const email = document.getElementById('addUserEmail').value.trim().toLowerCase();
+    const errEl = document.getElementById('addUserError');
+    errEl.textContent = '';
+    if (!email) { errEl.textContent = 'Email is required.'; return; }
+    if (!email.includes('@')) { errEl.textContent = 'Please enter a valid email address.'; return; }
+    const res  = await fetch('/api/admin/users/add', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email})});
     const data = await res.json();
     if (data.ok) {
-      msg.style.color='#22c55e'; msg.textContent=`User '${username}' added.`;
-      document.getElementById('adminNewUser').value = '';
-      document.getElementById('adminNewPass').value = '';
-      loadAdminTab();
+      document.getElementById('addUserResultEmail').textContent = email;
+      document.getElementById('addUserResultPass').textContent  = data.temp_password;
+      document.getElementById('addUserStep1').style.display = 'none';
+      document.getElementById('addUserStep2').style.display = '';
     } else {
-      msg.style.color='#f87171'; msg.textContent = data.error || 'Error adding user.';
+      errEl.textContent = data.error || 'Error creating user.';
+    }
+  }
+
+  function copyTempPass() {
+    const pass = document.getElementById('addUserResultPass').textContent;
+    navigator.clipboard.writeText(pass).then(() => {
+      const btn = event.target;
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = 'Copy', 2000);
+    });
+  }
+
+  async function submitNewPassword() {
+    const pass    = document.getElementById('newPassInput').value;
+    const confirm = document.getElementById('newPassConfirm').value;
+    const errEl   = document.getElementById('newPassError');
+    errEl.textContent = '';
+    if (pass.length < 8)    { errEl.textContent = 'Password must be at least 8 characters.'; return; }
+    if (pass !== confirm)   { errEl.textContent = 'Passwords do not match.'; return; }
+    const res  = await fetch('/api/change-password', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password: pass})});
+    const data = await res.json();
+    if (data.ok) {
+      currentUser.must_change_password = false;
+      document.getElementById('changePassOverlay').style.display = 'none';
+    } else {
+      errEl.textContent = data.error || 'Error updating password.';
     }
   }
 
@@ -3582,27 +3732,73 @@ HTML = """<!DOCTYPE html>
 
 <!-- ── Admin Tab Panel ── -->
 <div class="tab-panel" id="tab-admin" style="display:none;padding:32px 24px;max-width:800px;margin:0 auto">
-  <h2 style="font-size:18px;font-weight:600;margin:0 0 6px">Dashboard Users</h2>
-  <p style="color:#64748b;font-size:13px;margin:0 0 24px">Manage who can log in to this dashboard.</p>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px">
+    <div>
+      <h2 style="font-size:18px;font-weight:600;margin:0 0 4px">Dashboard Users</h2>
+      <p style="color:#64748b;font-size:13px;margin:0">Manage who can log in to this dashboard.</p>
+    </div>
+    <button id="adminAddBtn" class="btn" onclick="openAddUserModal()"
+      style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px;display:none">
+      + Add User
+    </button>
+  </div>
+  <div id="adminUsersWrap"></div>
+</div>
 
-  <div id="adminUsersWrap" style="margin-bottom:32px"></div>
-
-  <div id="adminAddSection" style="background:#1e293b;border-radius:10px;padding:20px;max-width:500px">
-    <div style="font-size:14px;font-weight:600;margin-bottom:14px">Add New User</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
-      <div>
-        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Username</label>
-        <input type="text" id="adminNewUser" placeholder="e.g. jane"
-          style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px 10px;color:#f1f5f9;font-size:14px">
-      </div>
-      <div>
-        <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:4px">Password</label>
-        <input type="password" id="adminNewPass" placeholder="Min 8 characters"
-          style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px 10px;color:#f1f5f9;font-size:14px">
+<!-- ── Add User Modal ── -->
+<div id="addUserModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:2000;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#0f172a;border-radius:14px;width:100%;max-width:440px;padding:28px;box-shadow:0 24px 80px rgba(0,0,0,.7);border:1px solid #1e293b">
+    <div id="addUserStep1">
+      <h3 style="font-size:16px;font-weight:600;margin:0 0 6px">Add New User</h3>
+      <p style="color:#64748b;font-size:13px;margin:0 0 20px">Enter the user's email address. A temporary password will be generated for them to use on first login.</p>
+      <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px">Email Address</label>
+      <input type="email" id="addUserEmail" placeholder="jane@hungryroot.com"
+        style="width:100%;box-sizing:border-box;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;color:#f1f5f9;font-size:14px;margin-bottom:16px"
+        onkeydown="if(event.key==='Enter')submitAddUser()">
+      <div id="addUserError" style="color:#f87171;font-size:13px;min-height:18px;margin-bottom:12px"></div>
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn btn-secondary" onclick="closeAddUserModal()" style="padding:8px 18px;font-size:13px">Cancel</button>
+        <button class="btn" onclick="submitAddUser()" style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px">Create User</button>
       </div>
     </div>
-    <button class="btn" onclick="adminAddUser()" style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px">Add User</button>
-    <div id="adminMsg" style="margin-top:8px;font-size:13px;min-height:18px"></div>
+    <div id="addUserStep2" style="display:none;text-align:center">
+      <div style="font-size:36px;margin-bottom:12px">✅</div>
+      <h3 style="font-size:16px;font-weight:600;margin:0 0 8px">User Created</h3>
+      <p style="color:#64748b;font-size:13px;margin:0 0 20px">Share these credentials with the user. They will be prompted to set a new password on first login.</p>
+      <div style="background:#1e293b;border-radius:8px;padding:16px;text-align:left;margin-bottom:20px">
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:4px">Email / Username</div>
+        <div id="addUserResultEmail" style="font-size:14px;font-weight:600;color:#f1f5f9;margin-bottom:12px"></div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:4px">Temporary Password</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <code id="addUserResultPass" style="font-size:16px;font-weight:700;color:#60a5fa;letter-spacing:1px;flex:1"></code>
+          <button class="btn btn-secondary" onclick="copyTempPass()" style="font-size:11px;padding:4px 10px">Copy</button>
+        </div>
+      </div>
+      <p style="color:#f59e0b;font-size:12px;margin:0 0 20px">⚠️ This password will not be shown again. Copy it now.</p>
+      <button class="btn" onclick="closeAddUserModal()" style="background:#3b82f6;color:#fff;padding:8px 24px;font-size:13px">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Change Password Overlay (forced on first login) ── -->
+<div id="changePassOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:3000;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#0f172a;border-radius:14px;width:100%;max-width:400px;padding:32px;box-shadow:0 24px 80px rgba(0,0,0,.7);border:1px solid #1e293b;text-align:center">
+    <div style="font-size:40px;margin-bottom:12px">🔑</div>
+    <h3 style="font-size:18px;font-weight:600;margin:0 0 8px">Set Your Password</h3>
+    <p style="color:#64748b;font-size:13px;margin:0 0 24px">You're using a temporary password. Please set a permanent password to continue.</p>
+    <div style="text-align:left;margin-bottom:12px">
+      <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px">New Password</label>
+      <input type="password" id="newPassInput" placeholder="Min 8 characters"
+        style="width:100%;box-sizing:border-box;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;color:#f1f5f9;font-size:14px">
+    </div>
+    <div style="text-align:left;margin-bottom:16px">
+      <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px">Confirm Password</label>
+      <input type="password" id="newPassConfirm" placeholder="Repeat password"
+        style="width:100%;box-sizing:border-box;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;color:#f1f5f9;font-size:14px"
+        onkeydown="if(event.key==='Enter')submitNewPassword()">
+    </div>
+    <div id="newPassError" style="color:#f87171;font-size:13px;min-height:18px;margin-bottom:12px"></div>
+    <button class="btn" onclick="submitNewPassword()" style="background:#3b82f6;color:#fff;padding:10px 28px;font-size:14px;width:100%">Set Password & Continue</button>
   </div>
 </div>
 
@@ -3863,7 +4059,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif self.path == "/api/me":
             token = self._get_cookie("session")
             me = _get_session_username(token)
-            self._json_response({"username": me or "", "is_admin": _is_admin(me) if me else False})
+            must_change = False
+            if me:
+                for u in _load_users():
+                    if u["username"] == me:
+                        must_change = bool(u.get("must_change_password", False))
+                        break
+            self._json_response({
+                "username":            me or "",
+                "is_admin":            _is_admin(me) if me else False,
+                "must_change_password": must_change,
+            })
 
         elif self.path == "/api/admin/users":
             token = self._get_cookie("session")
@@ -3992,26 +4198,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if self._require_admin(): return
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
-            new_user = body.get("username", "").strip()
-            new_pass = body.get("password", "").strip()
-            if not new_user or not new_pass:
-                self._json_response({"ok": False, "error": "Username and password are required."})
-                return
-            if len(new_pass) < 8:
-                self._json_response({"ok": False, "error": "Password must be at least 8 characters."})
+            new_user = body.get("email", "").strip().lower()
+            if not new_user:
+                self._json_response({"ok": False, "error": "Email is required."})
                 return
             users = _load_users()
             if any(u["username"] == new_user for u in users):
                 self._json_response({"ok": False, "error": f"User '{new_user}' already exists."})
                 return
+            temp_pass = _generate_temp_password()
             users.append({
-                "username":      new_user,
-                "password_hash": _hash_password(new_pass),
-                "is_admin":      False,
-                "created_at":    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "username":             new_user,
+                "password_hash":        _hash_password(temp_pass),
+                "is_admin":             False,
+                "must_change_password": True,
+                "created_at":           time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             })
             _save_users(users)
-            self._json_response({"ok": True})
+            _users_sheets_sync_bg(DashboardHandler.config or {})
+            self._json_response({"ok": True, "temp_password": temp_pass})
 
         elif self.path == "/api/admin/users/delete":
             if self._require_admin(): return
@@ -4032,6 +4237,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_response({"ok": False, "error": "Cannot delete the last user."})
                 return
             _save_users(updated)
+            _users_sheets_sync_bg(DashboardHandler.config or {})
             self._json_response({"ok": True})
 
         elif self.path == "/api/admin/users/toggle-admin":
@@ -4055,6 +4261,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_response({"ok": False, "error": "User not found."})
                 return
             _save_users(users)
+            _users_sheets_sync_bg(DashboardHandler.config or {})
             self._json_response({"ok": True})
 
         elif self.path == "/api/admin/users/password":
@@ -4077,6 +4284,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_response({"ok": False, "error": "User not found."})
                 return
             _save_users(users)
+            _users_sheets_sync_bg(DashboardHandler.config or {})
+            self._json_response({"ok": True})
+
+        elif self.path == "/api/change-password":
+            token = self._get_cookie("session")
+            me = _get_session_username(token)
+            if not me:
+                self._json_response({"ok": False, "error": "Not authenticated."}, status=401)
+                return
+            length   = int(self.headers.get("Content-Length", 0))
+            body     = json.loads(self.rfile.read(length))
+            new_pass = body.get("password", "").strip()
+            if len(new_pass) < 8:
+                self._json_response({"ok": False, "error": "Password must be at least 8 characters."})
+                return
+            users = _load_users()
+            found = False
+            for u in users:
+                if u["username"] == me:
+                    u["password_hash"]        = _hash_password(new_pass)
+                    u["must_change_password"] = False
+                    found = True
+                    break
+            if not found:
+                self._json_response({"ok": False, "error": "User not found."})
+                return
+            _save_users(users)
+            _users_sheets_sync_bg(DashboardHandler.config or {})
             self._json_response({"ok": True})
 
         else:
@@ -4149,7 +4384,8 @@ def main():
         print(f"✅ Cloud mode — config from environment variables")
         if not DASHBOARD_PASS:
             print("⚠️  WARNING: DASHBOARD_PASS is not set. Login will be disabled.")
-        _sheets_restore(cfg)  # restore offboarding data from Sheet if local file is missing
+        _sheets_restore(cfg)        # restore offboarding data from Sheet
+        _users_sheets_restore(cfg)  # restore users from Sheet
     else:
         # Local mode: load from JSON or run first-time setup
         cfg = load_config()
