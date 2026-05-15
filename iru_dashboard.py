@@ -492,37 +492,63 @@ def _sheets_restore(cfg):
 # Onboarding Checklist — reads from separate Google Sheet (transposed layout)
 # ---------------------------------------------------------------------------
 
+def _parse_hyperlink_formula(formula):
+    """Extract the URL from a =HYPERLINK("url","label") formula string, or return None."""
+    if not isinstance(formula, str):
+        return None
+    s = formula.strip()
+    if not s.upper().startswith("=HYPERLINK("):
+        return None
+    # Extract first quoted argument
+    inner = s[len("=HYPERLINK("):]
+    if inner.startswith('"'):
+        end = inner.find('"', 1)
+        if end > 0:
+            return inner[1:end]
+    return None
+
+
 def _onboarding_checklist_read(email, cfg=None):
     """Return checklist status for one employee from the onboarding roster sheet.
 
     Layout: each ROW is one employee; column U (index 20) holds their email.
-    The header row (row 0) contains column names — we scan it to find which
-    columns correspond to the 4 checklist fields.
+    Row 2 (index 1) is the header row; data starts at row 3 (index 2).
+
+    Completion logic:
+    - Equipment Tracking: any non-empty value = done; tries to extract a tracking
+      URL from HYPERLINK formulas so it can be rendered as a clickable link.
+    - Other fields (email fields): any non-empty value = sent/done.
     """
     sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or (cfg or {}).get("google_service_account_json", "")
     if not sa_json:
         return {"error": "No Google service account configured"}
 
+    EMAIL_COL      = 20  # column U (0-based)
+    HEADER_ROW_IDX = 1   # row 2 in sheet (0-based index 1)
+    email_lower    = email.strip().lower()
+
     try:
         service = _get_sheets_service(sa_json)
-        result  = service.spreadsheets().values().get(
+        # Read formatted values for display + completion check
+        rows_fmt = service.spreadsheets().values().get(
             spreadsheetId=ONBOARDING_ROSTER_SHEET_ID,
             range=f"'{ONBOARDING_ROSTER_TAB}'",
             valueRenderOption="FORMATTED_VALUE",
-        ).execute()
-        rows = result.get("values", [])
+        ).execute().get("values", [])
+        # Read formulas to detect HYPERLINK() cells (Equipment Tracking)
+        rows_fml = service.spreadsheets().values().get(
+            spreadsheetId=ONBOARDING_ROSTER_SHEET_ID,
+            range=f"'{ONBOARDING_ROSTER_TAB}'",
+            valueRenderOption="FORMULA",
+        ).execute().get("values", [])
     except Exception as exc:
         return {"error": f"Sheet read failed: {exc}"}
 
-    if not rows:
+    if not rows_fmt:
         return {"error": "Onboarding sheet is empty"}
 
-    EMAIL_COL      = 20  # column U (0-based)
-    HEADER_ROW_IDX = 1   # row 2 in sheet (0-based index 1)
-    email_lower = email.strip().lower()
-
-    # ── Step 1: find the header row and map field names → column indices ──────
-    header_row = rows[HEADER_ROW_IDX] if len(rows) > HEADER_ROW_IDX else []
+    # ── Step 1: find column indices from header row ───────────────────────────
+    header_row = rows_fmt[HEADER_ROW_IDX] if len(rows_fmt) > HEADER_ROW_IDX else []
     field_cols = {}  # field_name → col_index
     for c_idx, cell in enumerate(header_row):
         cell_str = str(cell).strip()
@@ -530,10 +556,9 @@ def _onboarding_checklist_read(email, cfg=None):
             if field not in field_cols and field.lower() in cell_str.lower():
                 field_cols[field] = c_idx
 
-    # ── Step 2: find the employee row by matching column U to the email ───────
-    # Data rows start at index 2 (row 3 in sheet)
+    # ── Step 2: find employee row by matching column U ────────────────────────
     employee_row_idx = None
-    for r_idx, row in enumerate(rows):
+    for r_idx, row in enumerate(rows_fmt):
         if r_idx <= HEADER_ROW_IDX:
             continue
         cell = row[EMAIL_COL] if EMAIL_COL < len(row) else ""
@@ -545,21 +570,34 @@ def _onboarding_checklist_read(email, cfg=None):
         return {"error": "Employee not found in onboarding sheet", "fields": {}}
 
     # ── Step 3: build result ──────────────────────────────────────────────────
-    employee_row = rows[employee_row_idx]
+    emp_fmt = rows_fmt[employee_row_idx]
+    emp_fml = rows_fml[employee_row_idx] if employee_row_idx < len(rows_fml) else []
+
     fields = {}
     for field in ONBOARDING_CHECKLIST_FIELDS:
-        if field in field_cols:
-            c_idx = field_cols[field]
-            raw   = employee_row[c_idx] if c_idx < len(employee_row) else ""
-            completed = raw == "✅" or str(raw).strip().upper() in ("TRUE", "YES", "1")
-            fields[field] = {
-                "completed": completed,
-                "raw":       raw,
-                "row":       employee_row_idx,
-                "col":       c_idx,
-            }
-        else:
-            fields[field] = {"completed": False, "raw": "", "row": None, "col": None}
+        if field not in field_cols:
+            fields[field] = {"completed": False, "raw": "", "url": None, "row": None, "col": None}
+            continue
+
+        c_idx     = field_cols[field]
+        raw       = emp_fmt[c_idx] if c_idx < len(emp_fmt) else ""
+        formula   = emp_fml[c_idx] if c_idx < len(emp_fml) else ""
+        completed = bool(str(raw).strip())  # any non-empty value = done
+
+        # For Equipment Tracking: try to pull a clickable URL
+        url = None
+        if field == "Equipment Tracking":
+            url = _parse_hyperlink_formula(formula)
+            if not url and isinstance(raw, str) and raw.strip().startswith("http"):
+                url = raw.strip()
+
+        fields[field] = {
+            "completed": completed,
+            "raw":       raw,
+            "url":       url,       # only populated for Equipment Tracking
+            "row":       employee_row_idx,
+            "col":       c_idx,
+        }
 
     return {"email": email, "fields": fields}
 
@@ -4106,44 +4144,46 @@ HTML = """<!DOCTYPE html>
 
       // ── Link-type field (Equipment Tracking) ──────────────────────────────
       if (OCL_LINK_FIELDS.has(field)) {
-        const hasLink = raw && raw.startsWith('http');
+        const url     = fd.url  || '';   // extracted from HYPERLINK formula
+        const hasLink = !!url;
+        const hasSent = !hasLink && !!raw; // has a value but no URL (e.g. "Sent")
+        const done    = hasLink || hasSent;
         return `
           <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;
-                      background:${hasLink ? 'rgba(59,130,246,.07)' : 'rgba(30,41,59,.8)'};
-                      border:1px solid ${hasLink ? 'rgba(59,130,246,.25)' : '#2d3748'};
+                      background:${done ? 'rgba(59,130,246,.07)' : 'rgba(30,41,59,.8)'};
+                      border:1px solid ${done ? 'rgba(59,130,246,.25)' : '#2d3748'};
                       border-radius:10px">
             <div style="font-size:18px;flex-shrink:0">${icon}</div>
             <div style="flex:1;min-width:0">
               <div style="font-size:13px;color:#94a3b8;margin-bottom:4px">${esc(field)}</div>
               ${hasLink
-                ? `<a href="${esc(raw)}" target="_blank" rel="noopener"
-                      style="font-size:13px;color:#60a5fa;word-break:break-all;text-decoration:underline;text-underline-offset:2px">
+                ? `<a href="${esc(url)}" target="_blank" rel="noopener"
+                      style="font-size:13px;color:#60a5fa;text-decoration:underline;text-underline-offset:2px">
                      🔗 Track shipment
                    </a>`
-                : `<span style="font-size:13px;color:#475569;font-style:italic">No tracking link yet</span>`}
+                : hasSent
+                  ? `<span style="font-size:13px;color:#94a3b8">${esc(raw)}</span>`
+                  : `<span style="font-size:13px;color:#475569;font-style:italic">Not assigned yet</span>`}
             </div>
-            ${hasLink ? `<div style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;flex-shrink:0;
-                              background:rgba(59,130,246,.2);color:#60a5fa">Shipped</div>` : ''}
+            ${done ? `<div style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;flex-shrink:0;
+                            background:rgba(59,130,246,.2);color:#60a5fa">${hasLink ? 'Shipped' : esc(raw)}</div>` : ''}
           </div>`;
       }
 
-      // ── Checkbox-type field ───────────────────────────────────────────────
-      const done      = fd.completed || false;
-      const canToggle = isAdmin && fd.row !== null && fd.row !== undefined;
+      // ── Email-sent-type field (any non-empty value = sent) ───────────────
+      const done      = fd.completed || false;  // set server-side: bool(raw.strip())
+      const sentLabel = raw && raw !== 'TRUE' && raw !== 'FALSE' ? esc(raw) : (done ? 'Sent' : 'Not Sent');
       return `
         <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;
                     background:${done ? 'rgba(34,197,94,.08)' : 'rgba(30,41,59,.8)'};
                     border:1px solid ${done ? 'rgba(34,197,94,.25)' : '#2d3748'};
-                    border-radius:10px;transition:background .15s">
-          <button onclick="toggleOclField(${JSON.stringify(field)}, ${!done})"
-                  title="${canToggle ? (done ? 'Mark incomplete' : 'Mark complete') : (isAdmin ? 'Field not found in sheet' : 'View only')}"
-                  ${!canToggle ? 'disabled' : ''}
-                  style="width:26px;height:26px;border-radius:50%;border:2px solid ${done ? '#4ade80' : '#475569'};
-                         background:${done ? '#4ade80' : 'transparent'};cursor:${canToggle ? 'pointer' : 'default'};
-                         display:flex;align-items:center;justify-content:center;flex-shrink:0;
-                         font-size:14px;line-height:1;padding:0;transition:all .15s">
+                    border-radius:10px">
+          <div style="width:26px;height:26px;border-radius:50%;border:2px solid ${done ? '#4ade80' : '#475569'};
+                      background:${done ? '#4ade80' : 'transparent'};
+                      display:flex;align-items:center;justify-content:center;flex-shrink:0;
+                      font-size:14px;line-height:1">
             ${done ? '✓' : ''}
-          </button>
+          </div>
           <div style="font-size:14px">${icon}</div>
           <div style="flex:1;font-size:14px;font-weight:${done ? '500' : '400'};color:${done ? '#e2e8f0' : '#94a3b8'}">
             ${esc(field)}
@@ -4151,7 +4191,7 @@ HTML = """<!DOCTYPE html>
           <div style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;flex-shrink:0;
                       background:${done ? 'rgba(34,197,94,.2)' : 'rgba(100,116,139,.15)'};
                       color:${done ? '#4ade80' : '#64748b'}">
-            ${done ? 'Done' : 'Pending'}
+            ${sentLabel}
           </div>
         </div>`;
     }).join('');
