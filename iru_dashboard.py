@@ -37,6 +37,8 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iru_conf
 CACHE_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iru_cache.json")
 USERS_FILE        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_users.json")
 OFFBOARDING_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "offboarding.json")
+ACTIVITY_FILE     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "activity_log.json")
+MAX_ACTIVITY      = 1000
 PORT              = int(os.environ.get("PORT", 8080))
 CACHE_TTL   = 15 * 60   # used for staleness checks; auto-refresh is disabled (refresh on login instead)
 
@@ -246,6 +248,101 @@ def _users_sheets_restore(cfg):
             print(f"[Sheets] Restored {len(users)} user(s) from Google Sheet.", flush=True)
     except Exception as exc:
         print(f"[Users sheet restore error] {exc}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Activity Log
+# ---------------------------------------------------------------------------
+_activity_lock = threading.Lock()
+
+
+def _log_activity(actor, action, target="", detail="", cfg=None):
+    """Append one entry to the activity log (file + async Sheets)."""
+    entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "actor":     actor or "system",
+        "action":    action,
+        "target":    target or "",
+        "detail":    detail or "",
+    }
+    with _activity_lock:
+        entries = []
+        if os.path.exists(ACTIVITY_FILE):
+            try:
+                with open(ACTIVITY_FILE) as f:
+                    entries = json.load(f)
+            except Exception:
+                pass
+        entries.append(entry)
+        if len(entries) > MAX_ACTIVITY:
+            entries = entries[-MAX_ACTIVITY:]
+        with open(ACTIVITY_FILE, "w") as f:
+            json.dump(entries, f, indent=2)
+    if cfg:
+        threading.Thread(target=_activity_sheets_append, args=(entry, cfg), daemon=True).start()
+
+
+def _activity_sheets_append(entry, cfg=None):
+    """Append one activity row to the 'Activity Log' sheet tab."""
+    try:
+        sa_json  = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or (cfg or {}).get("google_service_account_json", "")
+        sheet_id = os.environ.get("GOOGLE_SHEET_ID")             or (cfg or {}).get("google_sheet_id", "")
+        if not sa_json or not sheet_id:
+            return
+        service = _get_sheets_service(sa_json)
+        _ensure_sheet_tab(service, sheet_id, "Activity Log")
+        api = service.spreadsheets().values()
+        # Write header if sheet is empty
+        existing = api.get(spreadsheetId=sheet_id, range="Activity Log!A1:A1").execute().get("values", [])
+        if not existing:
+            api.append(
+                spreadsheetId=sheet_id, range="Activity Log!A:E",
+                valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+                body={"values": [["Timestamp", "Actor", "Action", "Target", "Detail"]]},
+            ).execute()
+        api.append(
+            spreadsheetId=sheet_id, range="Activity Log!A:E",
+            valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+            body={"values": [[entry["timestamp"], entry["actor"], entry["action"], entry["target"], entry["detail"]]]},
+        ).execute()
+    except Exception as exc:
+        print(f"[Activity sheet error] {exc}", flush=True)
+
+
+def _activity_sheets_restore(cfg):
+    """On startup: restore activity log from the 'Activity Log' Google Sheet tab."""
+    sa_json  = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or cfg.get("google_service_account_json", "")
+    sheet_id = os.environ.get("GOOGLE_SHEET_ID")             or cfg.get("google_sheet_id", "")
+    if not sa_json or not sheet_id:
+        return
+    try:
+        service = _get_sheets_service(sa_json)
+        meta = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        existing = [s["properties"]["title"] for s in meta.get("sheets", [])]
+        if "Activity Log" not in existing:
+            return
+        rows = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range="Activity Log!A:E"
+        ).execute().get("values", [])
+        if len(rows) < 2:
+            return
+        entries = [
+            {
+                "timestamp": row[0] if len(row) > 0 else "",
+                "actor":     row[1] if len(row) > 1 else "",
+                "action":    row[2] if len(row) > 2 else "",
+                "target":    row[3] if len(row) > 3 else "",
+                "detail":    row[4] if len(row) > 4 else "",
+            }
+            for row in rows[1:] if row
+        ]
+        if entries:
+            with _activity_lock:
+                with open(ACTIVITY_FILE, "w") as f:
+                    json.dump(entries[-MAX_ACTIVITY:], f, indent=2)
+            print(f"[Sheets] Restored {len(entries)} activity log entries.", flush=True)
+    except Exception as exc:
+        print(f"[Activity sheet restore error] {exc}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -3637,6 +3734,64 @@ HTML = """<!DOCTYPE html>
     } catch(e) {
       wrap.innerHTML = `<div style="color:#f87171">Error: ${e.message}</div>`;
     }
+    // Load activity log below users table
+    loadActivityLog();
+  }
+
+  const ACTION_STYLES = {
+    "Logged in":               {bg:"rgba(59,130,246,.15)",  color:"#60a5fa",  icon:"🔑"},
+    "Added user":              {bg:"rgba(34,197,94,.15)",   color:"#4ade80",  icon:"➕"},
+    "Removed user":            {bg:"rgba(239,68,68,.15)",   color:"#f87171",  icon:"🗑"},
+    "Set role to Admin":       {bg:"rgba(245,158,11,.15)",  color:"#fbbf24",  icon:"⬆️"},
+    "Set role to Viewer":      {bg:"rgba(100,116,139,.15)", color:"#94a3b8",  icon:"⬇️"},
+    "Reset password":          {bg:"rgba(168,85,247,.15)",  color:"#c084fc",  icon:"🔄"},
+    "Changed password for user":{bg:"rgba(168,85,247,.15)", color:"#c084fc",  icon:"🔒"},
+    "Changed own password":    {bg:"rgba(168,85,247,.15)",  color:"#c084fc",  icon:"🔒"},
+    "Marked device received":  {bg:"rgba(20,184,166,.15)",  color:"#2dd4bf",  icon:"📦"},
+  };
+
+  function fmtRelTime(iso) {
+    const diff = Math.floor((Date.now() - new Date(iso)) / 1000);
+    if (diff < 60)   return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
+    return `${Math.floor(diff/86400)}d ago`;
+  }
+
+  async function loadActivityLog() {
+    const wrap = document.getElementById('activityLogWrap');
+    if (!wrap) return;
+    if (!currentUser.is_admin) { wrap.style.display = 'none'; return; }
+    try {
+      const res     = await fetch('/api/admin/activity');
+      const entries = await res.json();
+      if (!entries.length) {
+        wrap.innerHTML = '<div style="color:#64748b;font-size:13px;padding:12px 0">No activity recorded yet.</div>';
+        return;
+      }
+      wrap.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+          <h3 style="font-size:15px;font-weight:600;margin:0">Activity Log</h3>
+          <span style="font-size:12px;color:#64748b">Last ${entries.length} events</span>
+        </div>
+        <div style="border:1px solid #1e293b;border-radius:10px;overflow:hidden">
+          ${entries.map(e => {
+            const s = ACTION_STYLES[e.action] || {bg:"rgba(100,116,139,.1)", color:"#94a3b8", icon:"📋"};
+            return `<div style="display:grid;grid-template-columns:110px 1fr auto;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid #1e293b;last-child:border-bottom:none">
+              <div style="font-size:11px;color:#64748b" title="${esc(e.timestamp)}">${fmtRelTime(e.timestamp)}</div>
+              <div>
+                <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:${s.bg};color:${s.color};margin-right:8px">${s.icon} ${esc(e.action)}</span>
+                <span style="font-size:13px;color:#f1f5f9;font-weight:500">${esc(e.actor)}</span>
+                ${e.target ? `<span style="font-size:12px;color:#64748b"> → ${esc(e.target)}</span>` : ''}
+                ${e.detail ? `<span style="font-size:11px;color:#475569;margin-left:6px">(${esc(e.detail)})</span>` : ''}
+              </div>
+              <div style="font-size:11px;color:#334155;white-space:nowrap">${esc(e.timestamp.slice(0,10))}</div>
+            </div>`;
+          }).join('')}
+        </div>`;
+    } catch(e) {
+      if (wrap) wrap.innerHTML = `<div style="color:#f87171;font-size:13px">Error loading activity log.</div>`;
+    }
   }
 
   function openAddUserModal() {
@@ -3763,7 +3918,8 @@ HTML = """<!DOCTYPE html>
       + Add User
     </button>
   </div>
-  <div id="adminUsersWrap"></div>
+  <div id="adminUsersWrap" style="margin-bottom:40px"></div>
+  <div id="activityLogWrap"></div>
 </div>
 
 <!-- ── Add User Modal ── -->
@@ -3878,6 +4034,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json_response({"ok": False, "error": "Admin privileges required."}, status=403)
             return True
         return False
+
+    def _actor(self):
+        """Return the username of the currently authenticated user."""
+        return _get_session_username(self._get_cookie("session")) or "unknown"
+
+    def _cfg(self):
+        return DashboardHandler.config or {}
 
     def do_GET(self):
         # ── Public routes (no auth needed) ───────────────────────────────────
@@ -4077,6 +4240,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             data = _load_offboarding()
             self._json_response(data.get(email, {}))
 
+        elif self.path == "/api/admin/activity":
+            entries = []
+            if os.path.exists(ACTIVITY_FILE):
+                try:
+                    with _activity_lock:
+                        with open(ACTIVITY_FILE) as f:
+                            entries = json.load(f)
+                except Exception:
+                    pass
+            self._json_response(list(reversed(entries[-200:])))
+
         elif self.path == "/api/me":
             token = self._get_cookie("session")
             me = _get_session_username(token)
@@ -4125,6 +4299,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 # Kick off a background refresh so the dashboard shows fresh data
                 _refresh_flag.set()
                 self._set_session_cookie(token)
+                ip = self.client_address[0]
+                _log_activity(username, "Logged in", detail=f"IP {ip}", cfg=self._cfg())
             else:
                 self._redirect("/login?error=1")
             return
@@ -4211,6 +4387,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                                        if body["device_received"] else None,
                     }
+                    if body["device_received"]:
+                        _log_activity(self._actor(), "Marked device received",
+                                      target=email, detail=f"Device {dev_id}", cfg=self._cfg())
             _save_offboarding(data)
             _sheets_sync_bg(email, data[email], DashboardHandler.config or {})
             self._json_response({"ok": True})
@@ -4237,6 +4416,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             })
             _save_users(users)
             _users_sheets_sync_bg(DashboardHandler.config or {})
+            _log_activity(self._actor(), "Added user", target=new_user, cfg=self._cfg())
             self._json_response({"ok": True, "temp_password": temp_pass})
 
         elif self.path == "/api/admin/users/delete":
@@ -4259,6 +4439,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             _save_users(updated)
             _users_sheets_sync_bg(DashboardHandler.config or {})
+            _log_activity(self._actor(), "Removed user", target=target, cfg=self._cfg())
             self._json_response({"ok": True})
 
         elif self.path == "/api/admin/users/toggle-admin":
@@ -4283,6 +4464,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             _save_users(users)
             _users_sheets_sync_bg(DashboardHandler.config or {})
+            new_role = "Admin" if next((u["is_admin"] for u in users if u["username"] == target), False) else "Viewer"
+            _log_activity(self._actor(), f"Set role to {new_role}", target=target, cfg=self._cfg())
             self._json_response({"ok": True})
 
         elif self.path == "/api/admin/users/reset-password":
@@ -4309,6 +4492,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             _save_users(users)
             _users_sheets_sync_bg(DashboardHandler.config or {})
+            _log_activity(self._actor(), "Reset password", target=target, cfg=self._cfg())
             self._json_response({"ok": True, "temp_password": temp_pass})
 
         elif self.path == "/api/admin/users/password":
@@ -4332,6 +4516,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             _save_users(users)
             _users_sheets_sync_bg(DashboardHandler.config or {})
+            _log_activity(self._actor(), "Changed password for user", target=target, cfg=self._cfg())
             self._json_response({"ok": True})
 
         elif self.path == "/api/change-password":
@@ -4359,6 +4544,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             _save_users(users)
             _users_sheets_sync_bg(DashboardHandler.config or {})
+            _log_activity(me, "Changed own password", cfg=self._cfg())
             self._json_response({"ok": True})
 
         else:
@@ -4431,8 +4617,9 @@ def main():
         print(f"✅ Cloud mode — config from environment variables")
         if not DASHBOARD_PASS:
             print("⚠️  WARNING: DASHBOARD_PASS is not set. Login will be disabled.")
-        _sheets_restore(cfg)        # restore offboarding data from Sheet
-        _users_sheets_restore(cfg)  # restore users from Sheet
+        _sheets_restore(cfg)           # restore offboarding data from Sheet
+        _users_sheets_restore(cfg)     # restore users from Sheet
+        _activity_sheets_restore(cfg)  # restore activity log from Sheet
     else:
         # Local mode: load from JSON or run first-time setup
         cfg = load_config()
