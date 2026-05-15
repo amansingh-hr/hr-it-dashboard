@@ -4093,13 +4093,42 @@ HTML = """<!DOCTYPE html>
     }
   }
 
+  // Fields that hold a URL/link instead of a boolean checkbox
+  const OCL_LINK_FIELDS = new Set(["Equipment Tracking"]);
+
   function renderOclItems(fields) {
     const container = document.getElementById('oclItems');
     const isAdmin   = currentUser.is_admin;
     container.innerHTML = OCL_FIELDS.map(field => {
-      const fd        = fields[field] || {};
+      const fd   = fields[field] || {};
+      const icon = OCL_ICONS[field] || '☑';
+      const raw  = fd.raw || '';
+
+      // ── Link-type field (Equipment Tracking) ──────────────────────────────
+      if (OCL_LINK_FIELDS.has(field)) {
+        const hasLink = raw && raw.startsWith('http');
+        return `
+          <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;
+                      background:${hasLink ? 'rgba(59,130,246,.07)' : 'rgba(30,41,59,.8)'};
+                      border:1px solid ${hasLink ? 'rgba(59,130,246,.25)' : '#2d3748'};
+                      border-radius:10px">
+            <div style="font-size:18px;flex-shrink:0">${icon}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;color:#94a3b8;margin-bottom:4px">${esc(field)}</div>
+              ${hasLink
+                ? `<a href="${esc(raw)}" target="_blank" rel="noopener"
+                      style="font-size:13px;color:#60a5fa;word-break:break-all;text-decoration:underline;text-underline-offset:2px">
+                     🔗 Track shipment
+                   </a>`
+                : `<span style="font-size:13px;color:#475569;font-style:italic">No tracking link yet</span>`}
+            </div>
+            ${hasLink ? `<div style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;flex-shrink:0;
+                              background:rgba(59,130,246,.2);color:#60a5fa">Shipped</div>` : ''}
+          </div>`;
+      }
+
+      // ── Checkbox-type field ───────────────────────────────────────────────
       const done      = fd.completed || false;
-      const icon      = OCL_ICONS[field] || '☑';
       const canToggle = isAdmin && fd.row !== null && fd.row !== undefined;
       return `
         <div style="display:flex;align-items:center;gap:14px;padding:13px 16px;
@@ -4116,8 +4145,7 @@ HTML = """<!DOCTYPE html>
             ${done ? '✓' : ''}
           </button>
           <div style="font-size:14px">${icon}</div>
-          <div style="flex:1;font-size:14px;font-weight:${done ? '500' : '400'};color:${done ? '#e2e8f0' : '#94a3b8'};
-                      text-decoration:${done ? 'none' : 'none'}">
+          <div style="flex:1;font-size:14px;font-weight:${done ? '500' : '400'};color:${done ? '#e2e8f0' : '#94a3b8'}">
             ${esc(field)}
           </div>
           <div style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:8px;flex-shrink:0;
