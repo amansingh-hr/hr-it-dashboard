@@ -648,6 +648,78 @@ def _onboarding_checklist_update(email, field, completed, cfg=None):
         return {"ok": False, "error": str(exc)}
 
 
+def _onboarding_checklist_read_bulk(emails, cfg=None):
+    """Read checklist fields for multiple employees in a single sheet fetch.
+    Returns dict: email.lower() → {fields: {field_name: {completed, raw, url}}}
+    """
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or (cfg or {}).get("google_service_account_json", "")
+    if not sa_json or not emails:
+        return {}
+
+    EMAIL_COL      = 20  # column U (0-based)
+    HEADER_ROW_IDX = 1   # row 2 in sheet (0-based index 1)
+    email_set      = {e.strip().lower() for e in emails if e}
+
+    try:
+        service  = _get_sheets_service(sa_json)
+        rows_fmt = service.spreadsheets().values().get(
+            spreadsheetId=ONBOARDING_ROSTER_SHEET_ID,
+            range=f"'{ONBOARDING_ROSTER_TAB}'",
+            valueRenderOption="FORMATTED_VALUE",
+        ).execute().get("values", [])
+        rows_fml = service.spreadsheets().values().get(
+            spreadsheetId=ONBOARDING_ROSTER_SHEET_ID,
+            range=f"'{ONBOARDING_ROSTER_TAB}'",
+            valueRenderOption="FORMULA",
+        ).execute().get("values", [])
+    except Exception:
+        return {}
+
+    if not rows_fmt:
+        return {}
+
+    # Map field names → column indices from header row
+    header_row = rows_fmt[HEADER_ROW_IDX] if len(rows_fmt) > HEADER_ROW_IDX else []
+    field_cols = {}
+    for c_idx, cell in enumerate(header_row):
+        cell_str = str(cell).strip()
+        for field in ONBOARDING_CHECKLIST_FIELDS:
+            if field not in field_cols and field.lower() in cell_str.lower():
+                field_cols[field] = c_idx
+
+    results = {}
+    for r_idx, row in enumerate(rows_fmt):
+        if r_idx <= HEADER_ROW_IDX:
+            continue
+        cell = row[EMAIL_COL] if EMAIL_COL < len(row) else ""
+        if not isinstance(cell, str):
+            continue
+        email_lower = cell.strip().lower()
+        if email_lower not in email_set:
+            continue
+
+        row_fml  = rows_fml[r_idx] if r_idx < len(rows_fml) else []
+        fields   = {}
+        for field in ONBOARDING_CHECKLIST_FIELDS:
+            if field not in field_cols:
+                fields[field] = {"completed": False, "raw": "", "url": None}
+                continue
+            c_idx     = field_cols[field]
+            raw       = row[c_idx]     if c_idx < len(row)     else ""
+            formula   = row_fml[c_idx] if c_idx < len(row_fml) else ""
+            completed = bool(str(raw).strip())
+            url       = None
+            if field == "Equipment Tracking":
+                url = _parse_hyperlink_formula(formula)
+                if not url and isinstance(raw, str) and raw.strip().startswith("http"):
+                    url = raw.strip()
+            fields[field] = {"completed": completed, "raw": raw, "url": url}
+
+        results[email_lower] = {"fields": fields}
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # FedEx Tracking API
 # ---------------------------------------------------------------------------
@@ -4009,6 +4081,38 @@ HTML = """<!DOCTYPE html>
         <div style="font-size:12px;color:#94a3b8">${s.label}</div>
       </div>`).join('');
 
+    // ── Fetch checklist data for all upcoming + flagged in one shot ───────────
+    const allEmails = [...upcoming, ...flagged].map(({u, p}) => p.email||u.email||'').filter(Boolean);
+    let checklist = {};
+    try {
+      const cr = await fetch('/api/onboarding/checklist/bulk', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({emails: allEmails}),
+      });
+      checklist = await cr.json();
+    } catch(e) { /* checklist stays empty — cells just show ✗ */ }
+
+    // Helper: ✓ / ✗ icon cell
+    function chkCell(done) {
+      return done
+        ? `<span style="font-size:16px;color:#4ade80;font-weight:700">✓</span>`
+        : `<span style="font-size:16px;color:#ef4444">✗</span>`;
+    }
+    // Helper: Equipment Tracking cell — link, ✓, or ✗
+    function equipCell(fd) {
+      if (!fd) return chkCell(false);
+      if (fd.url)       return `<a href="${esc(fd.url)}" target="_blank" rel="noopener"
+                                   title="Track shipment"
+                                   style="font-size:18px;text-decoration:none"
+                                   onclick="event.stopPropagation()">🔗</a>`;
+      if (fd.completed) return chkCell(true);
+      return chkCell(false);
+    }
+    function getChecklist(email) {
+      return (checklist[(email||'').toLowerCase()] || {}).fields || {};
+    }
+
     // ── Upcoming table ─────────────────────────────────────────────────────
     if (!upcoming.length) {
       upcomingEl.innerHTML = '<div style="color:#64748b;padding:20px;background:#1e293b;border-radius:10px;text-align:center">No upcoming hires found in Okta.</div>';
@@ -4017,31 +4121,34 @@ HTML = """<!DOCTYPE html>
         <table class="data-table" style="width:100%">
           <thead><tr>
             <th>Name</th><th>Email</th><th>Department</th><th>Title</th><th>Manager</th>
-            <th>Start Date</th><th>Starts</th><th>Activation Email</th>
+            <th>Start Date</th><th style="text-align:center">Equipment</th>
+            <th style="text-align:center">Welcome Email</th>
+            <th style="text-align:center">Tracking Email</th>
+            <th>Activation Email</th>
           </tr></thead>
           <tbody>
           ${upcoming.map(({u, p, hire, diffDays, status}) => {
-            const isToday = diffDays === 0;
-            const isSoon  = hire <= endOfWeek && diffDays > 0;
-            const rowBg   = isToday ? 'background:rgba(34,197,94,.07)' : isSoon ? 'background:rgba(245,158,11,.05)' : '';
+            const isToday  = diffDays === 0;
+            const isSoon   = hire <= endOfWeek && diffDays > 0;
+            const rowBg    = isToday ? 'background:rgba(34,197,94,.07)' : isSoon ? 'background:rgba(245,158,11,.05)' : '';
             const manager  = p.manager || p.managerId || '—';
             const fullName = esc((p.firstName||'')+' '+(p.lastName||'')).trim();
-            const email    = esc(p.email||u.email||'');
-            return `<tr style="${rowBg};cursor:pointer" title="Click to view IT checklist"
-                        data-email="${esc(p.email||u.email||'')}"
+            const emailVal = p.email||u.email||'';
+            const cl       = getChecklist(emailVal);
+            return `<tr style="${rowBg}" title="Click for checklist detail"
+                        data-email="${esc(emailVal)}"
                         data-name="${esc((p.firstName||'')+' '+(p.lastName||''))}"
-                        onclick="openOnboardingModal(this.dataset.email, this.dataset.name)">
+                        onclick="openOnboardingModal(this.dataset.email, this.dataset.name)"
+                        style="${rowBg};cursor:pointer">
               <td style="font-weight:600">${fullName}</td>
-              <td style="color:#94a3b8;font-size:13px">${email}</td>
+              <td style="color:#94a3b8;font-size:13px">${esc(emailVal)}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.department||'—')}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.title||'—')}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(manager)}</td>
               <td style="font-size:13px">${hire.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}</td>
-              <td>
-                <span style="font-size:12px;font-weight:600;color:${isToday ? '#4ade80' : isSoon ? '#fbbf24' : '#94a3b8'}">
-                  ${daysLabel(diffDays, true)}
-                </span>
-              </td>
+              <td style="text-align:center">${equipCell(cl['Equipment Tracking'])}</td>
+              <td style="text-align:center">${chkCell((cl['Welcome Email (IT & People Team)']||{}).completed)}</td>
+              <td style="text-align:center">${chkCell((cl['IT Equipment Tracking Email']||{}).completed)}</td>
               <td>${statusPill(status)}</td>
             </tr>`;
           }).join('')}
@@ -4058,21 +4165,30 @@ HTML = """<!DOCTYPE html>
         <table class="data-table" style="width:100%;background:transparent">
           <thead><tr>
             <th>Name</th><th>Email</th><th>Department</th><th>Manager</th>
-            <th>Start Date</th><th>Overdue</th><th>Activation Email</th>
+            <th>Start Date</th><th>Overdue</th>
+            <th style="text-align:center">Equipment</th>
+            <th style="text-align:center">Welcome Email</th>
+            <th style="text-align:center">Tracking Email</th>
+            <th>Activation Email</th>
           </tr></thead>
           <tbody>
           ${flagged.map(({u, p, hire, diffDays, status}) => {
-            const manager = p.manager || p.managerId || '—';
-            return `<tr style="cursor:pointer" title="Click to view IT checklist"
-                        data-email="${esc(p.email||u.email||'')}"
+            const manager  = p.manager || p.managerId || '—';
+            const emailVal = p.email||u.email||'';
+            const cl       = getChecklist(emailVal);
+            return `<tr data-email="${esc(emailVal)}"
                         data-name="${esc((p.firstName||'')+' '+(p.lastName||''))}"
-                        onclick="openOnboardingModal(this.dataset.email, this.dataset.name)">
+                        onclick="openOnboardingModal(this.dataset.email, this.dataset.name)"
+                        style="cursor:pointer">
               <td style="font-weight:600">${esc((p.firstName||'')+' '+(p.lastName||'')).trim()}</td>
-              <td style="color:#94a3b8;font-size:13px">${esc(p.email||u.email||'')}</td>
+              <td style="color:#94a3b8;font-size:13px">${esc(emailVal)}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.department||'—')}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(manager)}</td>
               <td style="font-size:13px">${hire.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}</td>
               <td style="color:#f87171;font-size:12px;font-weight:600">${daysLabel(diffDays, false)}</td>
+              <td style="text-align:center">${equipCell(cl['Equipment Tracking'])}</td>
+              <td style="text-align:center">${chkCell((cl['Welcome Email (IT & People Team)']||{}).completed)}</td>
+              <td style="text-align:center">${chkCell((cl['IT Equipment Tracking Email']||{}).completed)}</td>
               <td>${statusPill(status)}</td>
             </tr>`;}).join('')}
           </tbody>
@@ -5074,6 +5190,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _users_sheets_sync_bg(DashboardHandler.config or {})
             _log_activity(self._actor(), "Changed password for user", target=target, cfg=self._cfg())
             self._json_response({"ok": True})
+
+        elif self.path == "/api/onboarding/checklist/bulk":
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length).decode())
+            emails = body.get("emails", [])
+            data   = _onboarding_checklist_read_bulk(emails, self._cfg())
+            self._json_response(data)
 
         elif self.path == "/api/onboarding/checklist/update":
             length = int(self.headers.get("Content-Length", 0))
