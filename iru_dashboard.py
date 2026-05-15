@@ -1587,6 +1587,7 @@ HTML = """<!DOCTYPE html>
     <button class="tab" onclick="switchTab('devices', this)">🖥️ All Devices</button>
     <button class="tab" onclick="switchTab('users', this)">👥 Users</button>
     <button class="tab" onclick="switchTab('departments', this)">🏢 By Department</button>
+    <button class="tab" onclick="switchTab('onboarding', this)">🌱 Onboarding</button>
     <button class="tab" onclick="switchTab('orphaned', this)">🚨 Pending Returns</button>
     <button class="tab" id="adminTabBtn" onclick="switchTab('admin', this)" style="margin-left:auto">🔐 Admin</button>
   </div>
@@ -1798,6 +1799,29 @@ HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- ── Tab: Onboarding ── -->
+  <div class="tab-panel" id="tab-onboarding" style="display:none;padding:28px 24px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px">
+      <div>
+        <h2 style="font-size:18px;font-weight:600;margin:0 0 4px">Onboarding</h2>
+        <p style="color:#64748b;font-size:13px;margin:0">Upcoming new hires and accounts needing attention</p>
+      </div>
+      <button class="btn btn-secondary" onclick="loadOnboardingTab()" style="font-size:13px;padding:7px 16px">↻ Refresh</button>
+    </div>
+    <!-- Stat pills -->
+    <div id="onboardingStats" style="display:flex;gap:12px;margin-bottom:28px;flex-wrap:wrap"></div>
+    <!-- Upcoming hires -->
+    <div style="margin-bottom:36px">
+      <h3 style="font-size:14px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;margin:0 0 14px">🗓 Starting Soon</h3>
+      <div id="onboardingUpcoming"></div>
+    </div>
+    <!-- Needs attention -->
+    <div>
+      <h3 style="font-size:14px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;margin:0 0 14px">⚠️ Needs Attention</h3>
+      <div id="onboardingFlagged"></div>
+    </div>
+  </div>
+
   <!-- ── Tab: Pending Returns ── -->
   <div class="tab-panel" id="tab-orphaned">
     <div id="orphanedBanner" style="display:none;align-items:center;gap:16px;background:linear-gradient(135deg,#1e1010,#2d1515);border:1px solid #7f1d1d;border-radius:10px;padding:14px 20px;margin-bottom:16px">
@@ -2001,7 +2025,8 @@ HTML = """<!DOCTYPE html>
     const panel = document.getElementById('tab-' + name);
     panel.classList.add('active');
     panel.style.display = '';
-    if (name === 'admin') loadAdminTab();
+    if (name === 'admin')      loadAdminTab();
+    if (name === 'onboarding') loadOnboardingTab();
   }
 
   // ── Config ────────────────────────────────────────────────────────────────
@@ -3678,6 +3703,157 @@ HTML = """<!DOCTYPE html>
     }
   }
   initSession().then(() => { fetchAll(); startCachePolling(); });
+
+  // ── Onboarding Tab ───────────────────────────────────────────────────────
+  async function loadOnboardingTab() {
+    const upcomingEl = document.getElementById('onboardingUpcoming');
+    const flaggedEl  = document.getElementById('onboardingFlagged');
+    const statsEl    = document.getElementById('onboardingStats');
+    upcomingEl.innerHTML = '<div style="color:#64748b;padding:20px">Loading…</div>';
+    flaggedEl.innerHTML  = '';
+    statsEl.innerHTML    = '';
+
+    // Pull from cached Okta users
+    let users = [];
+    try {
+      const res = await fetch('/api/okta-users');
+      users = await res.json();
+    } catch(e) {
+      upcomingEl.innerHTML = `<div style="color:#f87171">Failed to load Okta users: ${e.message}</div>`;
+      return;
+    }
+    if (!Array.isArray(users) || !users.length) {
+      upcomingEl.innerHTML = '<div style="color:#64748b;padding:20px">No Okta users available. Check Okta credentials in Settings.</div>';
+      return;
+    }
+
+    const today  = new Date(); today.setHours(0,0,0,0);
+    const NOT_ACTIVE = new Set(['STAGED','PROVISIONED']);
+    const STATUS_LABEL = {
+      'STAGED':      {label:'Not Sent',   bg:'rgba(100,116,139,.2)', color:'#94a3b8'},
+      'PROVISIONED': {label:'Invite Sent',bg:'rgba(245,158,11,.2)',  color:'#fbbf24'},
+      'ACTIVE':      {label:'Active',     bg:'rgba(34,197,94,.2)',   color:'#4ade80'},
+      'SUSPENDED':   {label:'Suspended',  bg:'rgba(239,68,68,.2)',   color:'#f87171'},
+      'DEPROVISIONED':{label:'Deprovisioned',bg:'rgba(239,68,68,.1)',color:'#f87171'},
+    };
+
+    function parseHireDate(val) {
+      if (!val) return null;
+      // Okta may store as "MM/DD/YYYY" or ISO "YYYY-MM-DD"
+      const d = new Date(val);
+      return isNaN(d) ? null : d;
+    }
+
+    function statusPill(status) {
+      const s = STATUS_LABEL[status] || {label: status, bg:'rgba(100,116,139,.15)', color:'#94a3b8'};
+      return `<span style="font-size:11px;font-weight:600;padding:2px 9px;border-radius:10px;background:${s.bg};color:${s.color}">${s.label}</span>`;
+    }
+
+    function daysLabel(d, future) {
+      const abs = Math.abs(d);
+      if (abs === 0) return future ? 'Today' : 'Today';
+      if (abs === 1) return future ? 'Tomorrow' : 'Yesterday';
+      return future ? `In ${abs} day${abs !== 1 ? 's' : ''}` : `${abs} day${abs !== 1 ? 's' : ''} ago`;
+    }
+
+    // Partition users
+    const upcoming = [], flagged = [];
+    for (const u of users) {
+      const p    = u.profile || {};
+      const hire = parseHireDate(p.hireDate);
+      if (!hire) continue;
+      hire.setHours(0,0,0,0);
+      const diffDays = Math.round((hire - today) / 86400000);
+      const status   = (u.status || '').toUpperCase();
+      if (diffDays >= 0) {
+        // Future hire — upcoming
+        upcoming.push({u, p, hire, diffDays, status});
+      } else if (NOT_ACTIVE.has(status)) {
+        // Past hire date, account not activated — flag
+        flagged.push({u, p, hire, diffDays, status});
+      }
+    }
+
+    // Sort upcoming by closest first, flagged by most overdue first
+    upcoming.sort((a, b) => a.diffDays - b.diffDays);
+    flagged.sort((a,  b) => a.diffDays - b.diffDays);
+
+    // Stat pills
+    const thisWeek = upcoming.filter(x => x.diffDays <= 7).length;
+    statsEl.innerHTML = [
+      {label:'Starting this week', val: thisWeek, bg:'rgba(34,197,94,.15)',  color:'#4ade80'},
+      {label:'Upcoming total',     val: upcoming.length, bg:'rgba(59,130,246,.15)', color:'#60a5fa'},
+      {label:'Need attention',     val: flagged.length,  bg: flagged.length ? 'rgba(239,68,68,.15)' : 'rgba(100,116,139,.1)', color: flagged.length ? '#f87171' : '#64748b'},
+    ].map(s => `
+      <div style="background:${s.bg};border-radius:10px;padding:12px 20px;display:flex;flex-direction:column;gap:2px;min-width:140px">
+        <div style="font-size:22px;font-weight:700;color:${s.color}">${s.val}</div>
+        <div style="font-size:12px;color:#94a3b8">${s.label}</div>
+      </div>`).join('');
+
+    // ── Upcoming table ─────────────────────────────────────────────────────
+    if (!upcoming.length) {
+      upcomingEl.innerHTML = '<div style="color:#64748b;padding:20px;background:#1e293b;border-radius:10px;text-align:center">No upcoming hires found in Okta.</div>';
+    } else {
+      upcomingEl.innerHTML = `
+        <table class="data-table" style="width:100%">
+          <thead><tr>
+            <th>Name</th><th>Email</th><th>Department</th><th>Title</th>
+            <th>Hire Date</th><th>Starts</th><th>Okta Status</th>
+          </tr></thead>
+          <tbody>
+          ${upcoming.map(({u, p, hire, diffDays, status}) => {
+            const isToday = diffDays === 0;
+            const isSoon  = diffDays <= 7;
+            const rowBg   = isToday ? 'background:rgba(34,197,94,.07)' : isSoon ? 'background:rgba(245,158,11,.05)' : '';
+            return `<tr style="${rowBg}">
+              <td style="font-weight:600">${esc((p.firstName||'')+' '+(p.lastName||'')).trim()}</td>
+              <td style="color:#94a3b8;font-size:13px">${esc(p.email||u.email||'')}</td>
+              <td style="color:#94a3b8;font-size:13px">${esc(p.department||'—')}</td>
+              <td style="color:#94a3b8;font-size:13px">${esc(p.title||'—')}</td>
+              <td style="font-size:13px">${hire.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}</td>
+              <td>
+                <span style="font-size:12px;font-weight:600;color:${isToday ? '#4ade80' : isSoon ? '#fbbf24' : '#94a3b8'}">
+                  ${daysLabel(diffDays, true)}
+                </span>
+              </td>
+              <td>${statusPill(status)}</td>
+            </tr>`;
+          }).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    // ── Flagged table ──────────────────────────────────────────────────────
+    if (!flagged.length) {
+      flaggedEl.innerHTML = '<div style="color:#4ade80;padding:20px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.2);border-radius:10px;text-align:center">✅ All past hires have activated their accounts.</div>';
+    } else {
+      flaggedEl.innerHTML = `
+        <div style="background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.2);border-radius:10px;padding:4px 0;margin-bottom:8px">
+        <table class="data-table" style="width:100%;background:transparent">
+          <thead><tr>
+            <th>Name</th><th>Email</th><th>Department</th><th>Hire Date</th>
+            <th>Overdue</th><th>Okta Status</th>
+          </tr></thead>
+          <tbody>
+          ${flagged.map(({u, p, hire, diffDays, status}) => `
+            <tr>
+              <td style="font-weight:600">${esc((p.firstName||'')+' '+(p.lastName||'')).trim()}</td>
+              <td style="color:#94a3b8;font-size:13px">${esc(p.email||u.email||'')}</td>
+              <td style="color:#94a3b8;font-size:13px">${esc(p.department||'—')}</td>
+              <td style="font-size:13px">${hire.toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}</td>
+              <td style="color:#f87171;font-size:12px;font-weight:600">${daysLabel(diffDays, false)}</td>
+              <td>${statusPill(status)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+        </div>
+        <p style="color:#64748b;font-size:12px;margin:6px 0 0">
+          These users have a hire date in the past but have not activated their Okta account.
+          <b>Invite Sent</b> means the activation email was delivered but not acted on.
+          <b>Not Sent</b> means no activation email has been sent yet.
+        </p>`;
+    }
+  }
 
   // ── Admin Tab ─────────────────────────────────────────────────────────────
   async function loadAdminTab() {
