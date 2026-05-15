@@ -2590,7 +2590,7 @@ HTML = """<!DOCTYPE html>
     btn.disabled = true;
     document.getElementById('errorBox').style.display = 'none';
     document.getElementById('loadingState').classList.add('show');
-    document.getElementById('dataArea').classList.remove('show');
+    document.getElementById('dataArea').classList.add('show');
 
     try {
       // Fetch Iru devices + Okta users + JumpCloud devices in parallel (all served from cache)
