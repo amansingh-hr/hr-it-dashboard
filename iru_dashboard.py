@@ -2825,22 +2825,32 @@ HTML = """<!DOCTYPE html>
         <div style="font-size:11px;color:#64748b">${esc(d.model)} · S/N: ${esc(d.serial_number||'—')}</div>`;
       }).join('<div style="margin:6px 0;border-top:1px solid #1e293b"></div>');
 
-      // Outbound box column
+      // Outbound box column — show live FedEx status if available
+      function statusPill(statusText) {
+        const lower = (statusText||'').toLowerCase();
+        const isDelivered = lower.includes('delivered');
+        const [bg, fg] = isDelivered ? GREEN : AMBER;
+        return `<span style="display:inline-block;font-size:11px;font-weight:600;padding:3px 9px;border-radius:10px;background:${bg};color:${fg};white-space:nowrap">${esc(statusText)}</span>`;
+      }
       let outboundCell;
-      if (rec.outbound_tracking) {
+      if (rec.outbound_status) {
+        outboundCell = `${statusPill(rec.outbound_status)}
+          <div style="font-size:10px;color:#64748b;margin-top:3px;font-family:monospace">${esc(rec.outbound_tracking||'')}</div>`;
+      } else if (rec.outbound_tracking || rec.box_shipped) {
         outboundCell = `${pill(true,'📦 Shipped','',GREEN,AMBER)}
-          <div style="font-size:10px;color:#64748b;margin-top:3px;font-family:monospace">${esc(rec.outbound_tracking)}</div>`;
-      } else if (rec.box_shipped) {
-        outboundCell = pill(true,'📦 Shipped','',GREEN,AMBER);
+          ${rec.outbound_tracking ? `<div style="font-size:10px;color:#64748b;margin-top:3px;font-family:monospace">${esc(rec.outbound_tracking)}</div>` : ''}`;
       } else {
         outboundCell = pill(false,'','📭 Not Shipped',GREEN,ORANGE);
       }
 
-      // Return status column
+      // Return status column — show live FedEx status if available
       let returnCell;
       const allReceived = devices.every(d => rec?.devices?.[d.device_id]?.received);
       if (rec.equipment_returned || allReceived) {
         returnCell = pill(true,'✓ Returned','',GREEN,AMBER);
+      } else if (rec.return_status) {
+        returnCell = `${statusPill(rec.return_status)}
+          <div style="font-size:10px;color:#64748b;margin-top:3px;font-family:monospace">${esc(rec.return_tracking||'')}</div>`;
       } else if (rec.return_tracking) {
         returnCell = `${pill(false,'','📬 In Transit',GREEN,AMBER)}
           <div style="font-size:10px;color:#64748b;margin-top:3px;font-family:monospace">${esc(rec.return_tracking)}</div>`;
@@ -3237,7 +3247,7 @@ HTML = """<!DOCTYPE html>
             placeholder="${placeholder}"
             style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #1e293b;border-radius:7px;padding:7px 10px;color:#f1f5f9;font-size:12px;outline:none;font-family:monospace"
             onfocus="this.style.borderColor='#3b82f6'"
-            onblur="this.style.borderColor='#1e293b';saveOffboardField('${email}','${fieldName}',this.value);if(this.value.trim())trackFedEx('${trackingId}','${statusId}','${autoCheckId}','${autoCheckField}','${email}')">
+            onblur="this.style.borderColor='#1e293b';saveOffboardField('${email}','${fieldName}',this.value);if(this.value.trim())trackFedEx('${trackingId}','${statusId}','${autoCheckId}','${autoCheckField}','${email}','${autoCheckId==='ob_box'?'outbound_status':'return_status'}')">
         </div>
         <div id="${statusId}" style="font-size:11px;padding:4px 14px 10px;color:#64748b;min-height:18px"></div>
       </div>`;
@@ -3327,8 +3337,8 @@ HTML = """<!DOCTYPE html>
       </div>`;
 
     // Auto-fetch FedEx status if tracking numbers are already saved
-    if (rec.outbound_tracking) trackFedEx('outboundTracking', 'outboundStatus', 'ob_box',    'box_shipped',        email);
-    if (rec.return_tracking)   trackFedEx('returnTracking',   'returnStatus',   'ob_return', 'equipment_returned', email);
+    if (rec.outbound_tracking) trackFedEx('outboundTracking', 'outboundStatus', 'ob_box',    'box_shipped',        email, 'outbound_status');
+    if (rec.return_tracking)   trackFedEx('returnTracking',   'returnStatus',   'ob_return', 'equipment_returned', email, 'return_status');
   }
 
   function closeOffboardModal() {
@@ -3395,7 +3405,7 @@ HTML = """<!DOCTYPE html>
     return p.length === 3 ? `${p[1]}/${p[2]}/${p[0]}` : dateStr;
   }
 
-  async function trackFedEx(inputId, statusId, autoCheckId, autoCheckField, autoEmail) {
+  async function trackFedEx(inputId, statusId, autoCheckId, autoCheckField, autoEmail, statusField) {
     const tracking = document.getElementById(inputId)?.value.trim();
     const statusEl = document.getElementById(statusId);
     if (!statusEl) return;
@@ -3408,9 +3418,12 @@ HTML = """<!DOCTYPE html>
       if (data.ok) {
         const label = data.statusByLocale || data.status || 'Status unknown';
         const dateStr = data.deliveryDate ? ` · ${fmtDeliveryDate(data.deliveryDate)}` : '';
+        const fullStatus = label + dateStr;
         const isDelivered = data.code === 'DL' || label.toLowerCase().includes('delivered');
         statusEl.style.color = isDelivered ? '#22c55e' : '#f59e0b';
-        statusEl.textContent = label + dateStr;
+        statusEl.textContent = fullStatus;
+        // Save status back to offboarding record so the table can show it
+        if (autoEmail && statusField) saveOffboardField(autoEmail, statusField, fullStatus);
         // Auto-check the related toggle if delivered
         if (isDelivered && autoCheckId) {
           const cb = document.getElementById(autoCheckId);
@@ -3884,7 +3897,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             rec = data[email]
             # Simple boolean / string fields
             for field in ("notes", "slack_deactivated", "google_deactivated",
-                          "box_shipped", "outbound_tracking", "return_tracking"):
+                          "box_shipped", "outbound_tracking", "outbound_status",
+                          "return_tracking", "return_status"):
                 if field in body:
                     rec[field] = body[field]
             # Per-device received flag
