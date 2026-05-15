@@ -3987,7 +3987,9 @@ HTML = """<!DOCTYPE html>
             const fullName = esc((p.firstName||'')+' '+(p.lastName||'')).trim();
             const email    = esc(p.email||u.email||'');
             return `<tr style="${rowBg};cursor:pointer" title="Click to view IT checklist"
-                        onclick="openOnboardingModal(${JSON.stringify(p.email||u.email||'')}, ${JSON.stringify((p.firstName||'')+' '+(p.lastName||''))})">
+                        data-email="${esc(p.email||u.email||'')}"
+                        data-name="${esc((p.firstName||'')+' '+(p.lastName||''))}"
+                        onclick="openOnboardingModal(this.dataset.email, this.dataset.name)">
               <td style="font-weight:600">${fullName}</td>
               <td style="color:#94a3b8;font-size:13px">${email}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.department||'—')}</td>
@@ -4021,7 +4023,9 @@ HTML = """<!DOCTYPE html>
           ${flagged.map(({u, p, hire, diffDays, status}) => {
             const manager = p.manager || p.managerId || '—';
             return `<tr style="cursor:pointer" title="Click to view IT checklist"
-                        onclick="openOnboardingModal(${JSON.stringify(p.email||u.email||'')}, ${JSON.stringify((p.firstName||'')+' '+(p.lastName||''))})">
+                        data-email="${esc(p.email||u.email||'')}"
+                        data-name="${esc((p.firstName||'')+' '+(p.lastName||''))}"
+                        onclick="openOnboardingModal(this.dataset.email, this.dataset.name)">
               <td style="font-weight:600">${esc((p.firstName||'')+' '+(p.lastName||'')).trim()}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.email||u.email||'')}</td>
               <td style="color:#94a3b8;font-size:13px">${esc(p.department||'—')}</td>
