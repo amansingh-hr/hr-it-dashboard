@@ -2268,7 +2268,7 @@ HTML = """<!DOCTYPE html>
     return AVATAR_COLORS[h % AVATAR_COLORS.length];
   }
   function initials(name) {
-    const parts = name.trim().split(/\s+/);
+    const parts = name.trim().split(/[\s]+/);
     return parts.length >= 2
       ? (parts[0][0] + parts[parts.length-1][0]).toUpperCase()
       : (name[0] || '?').toUpperCase();
