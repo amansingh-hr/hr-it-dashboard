@@ -1605,7 +1605,7 @@ HTML = """<!DOCTYPE html>
           <th style="text-align:center">Google</th>
           <th>Outbound Box</th>
           <th>Return Status</th>
-          <th>Actions</th>
+          <th>Mark Received</th>
         </tr></thead>
         <tbody id="orphanedBody"></tbody>
       </table>
@@ -2810,7 +2810,7 @@ HTML = """<!DOCTYPE html>
       const name = ou ? `${ou.profile?.firstName || ''} ${ou.profile?.lastName || ''}`.trim() : email;
       const termDate = ou?.profile?.terminationDate || ou?.statusChanged;
 
-      // Device cell — one line per device
+      // Device cell — one line per device (clicks stop propagation so row click still works)
       const deviceCell = devices.map(d => {
         const devRec  = rec?.devices?.[d.device_id] || {};
         const received = devRec.received || false;
@@ -2818,8 +2818,8 @@ HTML = """<!DOCTYPE html>
           ? `<span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:8px;background:#14532d;color:#86efac">✓ Received</span>`
           : `<span style="font-size:10px;font-weight:600;padding:2px 7px;border-radius:8px;background:#431a1a;color:#fca5a5">⏳ Pending</span>`;
         return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
-          <button class="link-device" style="font-size:12px" onclick="openDeviceDrawer(${d._idx})">${esc(d.device_name)}</button>
-          ${kandjiLink(d)}
+          <button class="link-device" style="font-size:12px" onclick="event.stopPropagation();openDeviceDrawer(${d._idx})">${esc(d.device_name)}</button>
+          <span onclick="event.stopPropagation()">${kandjiLink(d)}</span>
           ${badge}
         </div>
         <div style="font-size:11px;color:#64748b">${esc(d.model)} · S/N: ${esc(d.serial_number||'—')}</div>`;
@@ -2848,8 +2848,20 @@ HTML = """<!DOCTYPE html>
         returnCell = pill(false,'','⏳ Awaiting',GREEN,ORANGE);
       }
 
-      return `<tr>
-        <td>
+      // Mark received cell — one button per device, stops row-click propagation
+      const markReceivedCell = devices.map(d => {
+        const devRec   = rec?.devices?.[d.device_id] || {};
+        const received = devRec.received || false;
+        if (received) {
+          return `<div style="font-size:11px;color:#22c55e;font-weight:600;padding:4px 0">✓ Received</div>`;
+        }
+        return `<button class="btn btn-secondary" style="font-size:11px;padding:4px 10px;white-space:nowrap;margin-bottom:4px"
+          onclick="event.stopPropagation();quickMarkReceived('${email}','${d.device_id}',this)">Mark Received</button>`;
+      }).join('');
+
+      return `<tr style="cursor:pointer" onclick="openOffboardModal('${email}')"
+        onmouseover="this.style.background='#1a2535'" onmouseout="this.style.background=''">
+        <td onclick="event.stopPropagation()">
           <div style="font-weight:500;font-size:13px">${esc(name)}</div>
           <div style="font-size:11px;color:#64748b;margin-top:2px">${esc(email)}</div>
         </td>
@@ -2860,10 +2872,32 @@ HTML = """<!DOCTYPE html>
         <td style="text-align:center">${pill(rec.google_deactivated,'✓','✗',GREEN,ORANGE)}</td>
         <td>${outboundCell}</td>
         <td>${returnCell}</td>
-        <td><button class="btn btn-secondary" style="font-size:12px;padding:5px 12px;white-space:nowrap"
-          onclick="openOffboardModal('${email}')">📋 Checklist</button></td>
+        <td onclick="event.stopPropagation()">${markReceivedCell}</td>
       </tr>`;
     }).join('');
+  }
+
+  async function quickMarkReceived(email, deviceId, btn) {
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    try {
+      const res = await fetch('/api/offboarding/update', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({email, device_id: deviceId, device_received: true})
+      });
+      const data = await res.json();
+      if (data.ok) {
+        btn.outerHTML = `<div style="font-size:11px;color:#22c55e;font-weight:600;padding:4px 0">✓ Received</div>`;
+        renderOrphaned(); // refresh the row
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'Mark Received';
+        alert(data.error || 'Error saving.');
+      }
+    } catch(e) {
+      btn.disabled = false;
+      btn.textContent = 'Mark Received';
+    }
   }
 
   // ── Render: By Department tab ────────────────────────────────────────────
