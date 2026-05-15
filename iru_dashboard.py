@@ -495,9 +495,9 @@ def _sheets_restore(cfg):
 def _onboarding_checklist_read(email, cfg=None):
     """Return checklist status for one employee from the onboarding roster sheet.
 
-    The sheet is TRANSPOSED: each employee is a COLUMN; each task is a ROW.
-    We scan every cell to locate the employee by email, then find each
-    checklist-field row by matching the field name against the first few columns.
+    Layout: each ROW is one employee; column U (index 20) holds their email.
+    The header row (row 0) contains column names — we scan it to find which
+    columns correspond to the 4 checklist fields.
     """
     sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or (cfg or {}).get("google_service_account_json", "")
     if not sa_json:
@@ -517,46 +517,48 @@ def _onboarding_checklist_read(email, cfg=None):
     if not rows:
         return {"error": "Onboarding sheet is empty"}
 
+    EMAIL_COL = 20  # column U (0-based)
     email_lower = email.strip().lower()
 
-    # ── Step 1: find the column index for this employee (match by email) ──────
-    employee_col = None
+    # ── Step 1: find the header row and map field names → column indices ──────
+    header_row_idx = 0
+    header_row     = rows[0] if rows else []
+    field_cols = {}  # field_name → col_index
+    for c_idx, cell in enumerate(header_row):
+        cell_str = str(cell).strip()
+        for field in ONBOARDING_CHECKLIST_FIELDS:
+            if field not in field_cols and field.lower() in cell_str.lower():
+                field_cols[field] = c_idx
+
+    # ── Step 2: find the employee row by matching column U to the email ───────
+    employee_row_idx = None
     for r_idx, row in enumerate(rows):
-        for c_idx, cell in enumerate(row):
-            if isinstance(cell, str) and cell.strip().lower() == email_lower:
-                employee_col = c_idx
-                break
-        if employee_col is not None:
+        if r_idx == header_row_idx:
+            continue
+        cell = row[EMAIL_COL] if EMAIL_COL < len(row) else ""
+        if isinstance(cell, str) and cell.strip().lower() == email_lower:
+            employee_row_idx = r_idx
             break
 
-    if employee_col is None:
-        return {"error": f"Employee not found in onboarding sheet", "fields": {}}
-
-    # ── Step 2: find the row index for each checklist field (match row label) ──
-    field_rows = {}   # field_name → row_index
-    for r_idx, row in enumerate(rows):
-        for c_idx in range(min(3, len(row))):   # task labels are in first 3 cols
-            cell = str(row[c_idx]).strip()
-            for field in ONBOARDING_CHECKLIST_FIELDS:
-                if field not in field_rows and field.lower() in cell.lower():
-                    field_rows[field] = r_idx
+    if employee_row_idx is None:
+        return {"error": "Employee not found in onboarding sheet", "fields": {}}
 
     # ── Step 3: build result ──────────────────────────────────────────────────
+    employee_row = rows[employee_row_idx]
     fields = {}
     for field in ONBOARDING_CHECKLIST_FIELDS:
-        if field in field_rows:
-            r_idx = field_rows[field]
-            row   = rows[r_idx] if r_idx < len(rows) else []
-            raw   = row[employee_col] if employee_col < len(row) else ""
+        if field in field_cols:
+            c_idx = field_cols[field]
+            raw   = employee_row[c_idx] if c_idx < len(employee_row) else ""
             completed = raw == "✅" or str(raw).strip().upper() in ("TRUE", "YES", "1")
             fields[field] = {
                 "completed": completed,
                 "raw":       raw,
-                "row":       r_idx,
-                "col":       employee_col,
+                "row":       employee_row_idx,
+                "col":       c_idx,
             }
         else:
-            fields[field] = {"completed": False, "raw": "", "row": None, "col": employee_col}
+            fields[field] = {"completed": False, "raw": "", "row": None, "col": None}
 
     return {"email": email, "fields": fields}
 
@@ -582,7 +584,7 @@ def _onboarding_checklist_update(email, field, completed, cfg=None):
     row_idx = fdata["row"]  # 0-based
     col_idx = fdata["col"]  # 0-based
 
-    # Convert to A1 notation (row is 1-based, col to letter)
+    # Convert to A1 notation
     def col_letter(n):
         s = ""
         n += 1  # 1-based
@@ -591,7 +593,7 @@ def _onboarding_checklist_update(email, field, completed, cfg=None):
             s = chr(65 + r) + s
         return s
 
-    cell_ref = f"{col_letter(col_idx)}{row_idx + 1}"
+    cell_ref  = f"{col_letter(col_idx)}{row_idx + 1}"
     new_value = "✅" if completed else ""
 
     try:
