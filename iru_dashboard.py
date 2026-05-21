@@ -3740,15 +3740,8 @@ HTML = """<!DOCTYPE html>
           ${deviceHTML}
         </div>
 
-        <div id="oktaAppsSection" style="padding:16px 20px;border-top:1px solid #1e293b">
-          <div style="font-size:12px;font-weight:600;color:#64748b;letter-spacing:.06em;text-transform:uppercase;margin-bottom:12px">
-            Okta App Assignments
-          </div>
-          <div id="oktaAppsList" style="color:#64748b;font-size:13px">Loading apps...</div>
-        </div>
-
         <!-- Terminate button -->
-        <div style="padding:16px 20px;border-top:1px solid #1e293b;display:flex;justify-content:flex-end">
+        <div style="padding:14px 20px;border-top:1px solid #1e293b;display:flex;justify-content:flex-end">
           <button onclick="openTerminateModal('${esc(u.email)}','${esc(u.name || u.email)}')"
             style="background:#7f1d1d;border:1px solid #991b1b;color:#fca5a5;padding:8px 20px;border-radius:8px;
                    font-size:13px;font-weight:600;cursor:pointer;transition:all .15s"
@@ -3756,6 +3749,13 @@ HTML = """<!DOCTYPE html>
             onmouseout="this.style.background='#7f1d1d';this.style.color='#fca5a5'">
             🔴 Terminate Employee
           </button>
+        </div>
+
+        <div id="oktaAppsSection" style="border-top:1px solid #1e293b">
+          <div style="padding:14px 20px 8px;font-size:12px;font-weight:600;color:#64748b;letter-spacing:.06em;text-transform:uppercase">
+            Okta App Assignments
+          </div>
+          <div id="oktaAppsList" style="color:#64748b;font-size:13px;padding:0 20px 16px">Loading apps...</div>
         </div>
       </div>`;
 
@@ -3782,15 +3782,15 @@ HTML = """<!DOCTYPE html>
         listEl.innerHTML = '<span style="color:#64748b">No app assignments found</span>';
         return;
       }
-      listEl.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
-        apps.map(function(a) {
+      listEl.innerHTML = apps.map(function(a) {
           const logo = a.logoUrl
-            ? '<img src="' + a.logoUrl + '" width="18" height="18" style="border-radius:3px;object-fit:contain;flex-shrink:0">'
-            : '<span>&#128279;</span>';
-          return '<div style="display:flex;align-items:center;gap:6px;background:#1e293b;border:1px solid #334155;' +
-            'border-radius:6px;padding:5px 10px;font-size:12px;color:#cbd5e1">' +
-            logo + '<span>' + esc(a.label) + '</span></div>';
-        }).join('') + '</div>';
+            ? '<img src="' + a.logoUrl + '" width="16" height="16" style="border-radius:2px;object-fit:contain;flex-shrink:0">'
+            : '<span style="font-size:13px;width:16px;text-align:center">&#128279;</span>';
+          return '<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #1e293b">' +
+            logo +
+            '<span style="font-size:13px;color:#cbd5e1">' + esc(a.label) + '</span>' +
+            '</div>';
+        }).join('');
     } catch(e) {
       if (listEl) listEl.innerHTML = '<span style="color:#f87171">Failed to load apps</span>';
     }
