@@ -1161,6 +1161,43 @@ def _find_cursor(email):
     return result
 
 
+def _get_okta_user_apps(email):
+    """Return list of Okta app assignments for a user (by email)."""
+    if not OKTA_API_TOKEN:
+        return {"error": "Okta not configured", "apps": []}
+    hdrs = {
+        "Authorization": f"SSWS {OKTA_API_TOKEN}",
+        "Accept": "application/json",
+    }
+    # Find user ID
+    encoded = urllib.parse.quote(f'profile.email eq "{email}"')
+    s, d = _http_request("GET", f"https://{OKTA_DOMAIN}/api/v1/users?search={encoded}", hdrs)
+    if s != 200 or not d:
+        return {"error": f"User lookup failed ({s})", "apps": []}
+    users = d if isinstance(d, list) else []
+    if not users:
+        return {"error": None, "apps": [], "not_found": True}
+    uid = users[0].get("id")
+    if not uid:
+        return {"error": "No user ID", "apps": []}
+    # Get app links
+    s2, d2 = _http_request("GET", f"https://{OKTA_DOMAIN}/api/v1/users/{uid}/appLinks", hdrs)
+    if s2 != 200:
+        return {"error": f"App links failed ({s2})", "apps": []}
+    apps = d2 if isinstance(d2, list) else []
+    return {
+        "error": None,
+        "apps": [
+            {
+                "label":   a.get("label", a.get("appName", "Unknown")),
+                "appName": a.get("appName", ""),
+                "logoUrl": a.get("logoUrl", ""),
+            }
+            for a in apps
+        ],
+    }
+
+
 def _terminate_okta(email):
     """Find and deactivate a user in Okta."""
     result = {"app": "Okta", "email": email, "found": False, "deactivated": False, "manual": False, "error": None}
@@ -3703,6 +3740,13 @@ HTML = """<!DOCTYPE html>
           ${deviceHTML}
         </div>
 
+        <div id="oktaAppsSection" style="padding:16px 20px;border-top:1px solid #1e293b">
+          <div style="font-size:12px;font-weight:600;color:#64748b;letter-spacing:.06em;text-transform:uppercase;margin-bottom:12px">
+            Okta App Assignments
+          </div>
+          <div id="oktaAppsList" style="color:#64748b;font-size:13px">Loading apps...</div>
+        </div>
+
         <!-- Terminate button -->
         <div style="padding:16px 20px;border-top:1px solid #1e293b;display:flex;justify-content:flex-end">
           <button onclick="openTerminateModal('${esc(u.email)}','${esc(u.name || u.email)}')"
@@ -3714,6 +3758,42 @@ HTML = """<!DOCTYPE html>
           </button>
         </div>
       </div>`;
+
+    // Async load Okta apps
+    loadOktaApps(u.email);
+  }
+
+  async function loadOktaApps(email) {
+    const listEl = document.getElementById('oktaAppsList');
+    if (!listEl) return;
+    try {
+      const res  = await fetch('/api/user-apps?email=' + encodeURIComponent(email));
+      const data = await res.json();
+      if (data.error) {
+        listEl.innerHTML = '<span style="color:#f87171">' + esc(data.error) + '</span>';
+        return;
+      }
+      if (data.not_found) {
+        listEl.innerHTML = '<span style="color:#64748b">User not found in Okta</span>';
+        return;
+      }
+      const apps = data.apps || [];
+      if (apps.length === 0) {
+        listEl.innerHTML = '<span style="color:#64748b">No app assignments found</span>';
+        return;
+      }
+      listEl.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
+        apps.map(function(a) {
+          const logo = a.logoUrl
+            ? '<img src="' + a.logoUrl + '" style="width:18px;height:18px;border-radius:3px;object-fit:contain;flex-shrink:0" onerror="this.style.display=\'none\'">'
+            : '<span style="font-size:14px">🔗</span>';
+          return '<div style="display:flex;align-items:center;gap:6px;background:#1e293b;border:1px solid #334155;' +
+            'border-radius:6px;padding:5px 10px;font-size:12px;color:#cbd5e1">' +
+            logo + '<span>' + esc(a.label) + '</span></div>';
+        }).join('') + '</div>';
+    } catch(e) {
+      if (listEl) listEl.innerHTML = '<span style="color:#f87171">Failed to load apps</span>';
+    }
   }
 
   // ── All-Users tab ────────────────────────────────────────────────────────
@@ -5801,6 +5881,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif self.path == "/api/termination-log":
             if self._require_auth(): return
             self._json_response(_load_term_log())
+
+        elif self.path.startswith("/api/user-apps"):
+            if self._require_auth(): return
+            qs   = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            email = qs.get("email", [""])[0].strip().lower()
+            if not email:
+                self._json_response({"error": "email required"}, status=400)
+                return
+            self._json_response(_get_okta_user_apps(email))
 
         elif self.path == "/api/admin/activity":
             entries = []
