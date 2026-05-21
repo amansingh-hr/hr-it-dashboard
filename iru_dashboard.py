@@ -60,6 +60,9 @@ DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
 WORKLEAP_API_KEY = os.environ.get("WORKLEAP_API_KEY", "")
 
 CURSOR_API_KEY   = os.environ.get("CURSOR_API_KEY", "")
+
+OKTA_DOMAIN    = os.environ.get("OKTA_DOMAIN", "hungryroot.okta.com")
+OKTA_API_TOKEN = os.environ.get("OKTA_API_TOKEN", "")
 PORT              = int(os.environ.get("PORT", 8080))
 CACHE_TTL   = 15 * 60   # used for staleness checks; auto-refresh is disabled (refresh on login instead)
 
@@ -1158,6 +1161,52 @@ def _find_cursor(email):
     return result
 
 
+def _terminate_okta(email):
+    """Find and deactivate a user in Okta."""
+    result = {"app": "Okta", "email": email, "found": False, "deactivated": False, "manual": False, "error": None}
+    if not OKTA_API_TOKEN:
+        result["error"] = "Credentials not configured"
+        return result
+
+    hdrs = {
+        "Authorization": f"SSWS {OKTA_API_TOKEN}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    # Search for user by email
+    encoded = urllib.parse.quote(f'profile.email eq "{email}"')
+    s, d = _http_request("GET", f"https://{OKTA_DOMAIN}/api/v1/users?search={encoded}", hdrs)
+    if s != 200:
+        result["error"] = f"Lookup failed ({s})"
+        return result
+
+    users = d if isinstance(d, list) else []
+    if not users:
+        return result  # not found
+
+    user = users[0]
+    result["found"] = True
+    uid    = user.get("id")
+    status = user.get("status", "")
+
+    if status in ("DEPROVISIONED", "DEACTIVATED", "SUSPENDED"):
+        result["deactivated"] = True
+        result["note"] = f"Already {status.lower()}"
+        return result
+
+    if not uid:
+        result["error"] = "No user ID"
+        return result
+
+    s2, d2 = _http_request("POST", f"https://{OKTA_DOMAIN}/api/v1/users/{uid}/lifecycle/deactivate", hdrs)
+    if s2 in (200, 204):
+        result["deactivated"] = True
+    else:
+        result["error"] = f"Deactivate failed ({s2}): {d2.get('errorSummary', d2)}"
+    return result
+
+
 def _termination_sheets_append(entry, cfg=None):
     """Append one termination row to the 'Termination Log' Google Sheet tab."""
     try:
@@ -1173,7 +1222,7 @@ def _termination_sheets_append(entry, cfg=None):
             api.append(
                 spreadsheetId=sheet_id, range="Termination Log!A:F",
                 valueInputOption="RAW", insertDataOption="INSERT_ROWS",
-                body={"values": [["Timestamp", "Actor", "Employee Email", "Datadog", "Braze", "Databricks", "Pingboard", "Cursor"]]},
+                body={"values": [["Timestamp", "Actor", "Employee Email", "Okta", "Datadog", "Braze", "Databricks", "Pingboard", "Cursor"]]},
             ).execute()
         results_by_app = {r.get("app", ""): r for r in entry.get("results", [])}
         def status(app):
@@ -1185,12 +1234,13 @@ def _termination_sheets_append(entry, cfg=None):
             if r.get("error"):        return "Error: " + str(r["error"])[:60]
             return "Not found"
         api.append(
-            spreadsheetId=sheet_id, range="Termination Log!A:H",
+            spreadsheetId=sheet_id, range="Termination Log!A:I",
             valueInputOption="RAW", insertDataOption="INSERT_ROWS",
             body={"values": [[
                 entry.get("timestamp", ""),
                 entry.get("actor", ""),
                 entry.get("email", ""),
+                status("Okta"),
                 status("Datadog"),
                 status("Braze"),
                 status("Databricks"),
@@ -1210,6 +1260,7 @@ def _run_termination(email, actor="system"):
         _terminate_databricks,
         _terminate_pingboard,
         _find_cursor,
+        _terminate_okta,
     ]
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
@@ -4591,7 +4642,7 @@ HTML = """<!DOCTYPE html>
         wrap.innerHTML = '<div style="color:#94a3b8;text-align:center;padding:40px">No terminations logged yet.</div>';
         return;
       }
-      const APP_ORDER = ['Braze','Cursor','Datadog','Databricks','Pingboard'];
+      const APP_ORDER = ['Okta','Braze','Cursor','Datadog','Databricks','Pingboard'];
       function statusCell(r) {
         if (!r) return '<td style="color:#64748b;font-size:12px">—</td>';
         if (r.deactivated) return '<td style="color:#4ade80;font-size:12px">✅ Done</td>';
