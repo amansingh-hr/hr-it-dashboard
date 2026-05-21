@@ -99,6 +99,10 @@ _sessions      = {}          # token → {"expiry": float, "username": str}
 _sessions_lock = threading.Lock()
 _users_lock    = threading.Lock()
 
+ALLOWED_EMAILS     = {"aman.singh@hungryroot.com", "rory.boyle@hungryroot.com"}
+_oauth_states      = {}   # state → expiry timestamp
+_oauth_states_lock = threading.Lock()
+
 
 def _hash_password(password):
     """Hash a password with PBKDF2-SHA256 + random salt."""
@@ -923,12 +927,8 @@ def _init_users():
 
 
 def _is_admin(username):
-    """Return True if the given username has admin privileges."""
-    users = _load_users()
-    for u in users:
-        if u["username"] == username:
-            return bool(u.get("is_admin", False))
-    return False
+    """All allowed users are admins."""
+    return (username or "").lower() in ALLOWED_EMAILS
 
 
 def _create_session(username):
@@ -959,6 +959,49 @@ def _get_session_username(token):
     with _sessions_lock:
         entry = _sessions.get(token)
         return entry["username"] if entry else None
+
+
+def _google_oauth_url(state):
+    params = urllib.parse.urlencode({
+        "client_id":     os.environ.get("GOOGLE_CLIENT_ID", ""),
+        "redirect_uri":  os.environ.get("GOOGLE_REDIRECT_URI", ""),
+        "response_type": "code",
+        "scope":         "openid email profile",
+        "state":         state,
+        "hd":            "hungryroot.com",
+        "access_type":   "online",
+        "prompt":        "select_account",
+    })
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
+
+
+def _google_exchange_code(code):
+    """Exchange auth code for (email, name). Returns (None, None) on failure."""
+    import urllib.request as _ureq
+    token_data_raw = urllib.parse.urlencode({
+        "code":          code,
+        "client_id":     os.environ.get("GOOGLE_CLIENT_ID", ""),
+        "client_secret": os.environ.get("GOOGLE_CLIENT_SECRET", ""),
+        "redirect_uri":  os.environ.get("GOOGLE_REDIRECT_URI", ""),
+        "grant_type":    "authorization_code",
+    }).encode()
+    try:
+        req = _ureq.Request("https://oauth2.googleapis.com/token", data=token_data_raw,
+                            method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        with _ureq.urlopen(req, timeout=15) as resp:
+            token_json = json.loads(resp.read())
+        access_token = token_json.get("access_token")
+        if not access_token:
+            return None, None
+        ui_req = _ureq.Request("https://www.googleapis.com/oauth2/v2/userinfo",
+                               headers={"Authorization": f"Bearer {access_token}"})
+        with _ureq.urlopen(ui_req, timeout=15) as resp:
+            ui = json.loads(resp.read())
+        return ui.get("email", "").lower(), ui.get("name", "")
+    except Exception as e:
+        print(f"[OAuth] Exchange error: {e}")
+        return None, None
 
 
 def _check_credentials(username, password):
@@ -1448,53 +1491,58 @@ LOGIN_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Hungryroot IT Dashboard — Login</title>
+<title>Hungryroot IT Dashboard — Sign In</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#0f172a;display:flex;align-items:center;justify-content:center;
        min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
   .card{background:#1e293b;border:1px solid #334155;border-radius:16px;
-        padding:48px 40px;width:100%;max-width:400px;box-shadow:0 25px 50px rgba(0,0,0,.5)}
-  .logo{display:flex;align-items:center;gap:14px;margin-bottom:32px}
-  .logo-icon{width:80px;height:42px;display:flex;align-items:center;justify-content:center}
-  .logo-text h1{font-size:20px;font-weight:700;color:#f1f5f9}
-  .logo-text p{font-size:13px;color:#64748b;margin-top:2px}
-  label{display:block;font-size:13px;font-weight:500;color:#94a3b8;margin-bottom:6px}
-  input{width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;
-        padding:10px 14px;color:#f1f5f9;font-size:15px;outline:none;margin-bottom:16px}
-  input:focus{border-color:#f38020}
-  button{width:100%;background:#f38020;color:#fff;border:none;border-radius:8px;
-         padding:12px;font-size:15px;font-weight:600;cursor:pointer;margin-top:4px}
-  button:hover{background:#d96c10}
+        padding:48px 40px;width:100%;max-width:400px;box-shadow:0 25px 50px rgba(0,0,0,.5);
+        text-align:center}
+  .logo{display:flex;align-items:center;gap:14px;margin-bottom:32px;justify-content:center}
+  .logo-text h1{font-size:20px;font-weight:700;color:#f1f5f9;text-align:left}
+  .logo-text p{font-size:13px;color:#64748b;margin-top:2px;text-align:left}
+  .subtitle{font-size:14px;color:#64748b;margin-bottom:32px;line-height:1.5}
+  .google-btn{display:flex;align-items:center;justify-content:center;gap:12px;
+              width:100%;background:#fff;color:#1f2937;border:none;border-radius:8px;
+              padding:13px 20px;font-size:15px;font-weight:500;cursor:pointer;
+              text-decoration:none;transition:background .15s;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+  .google-btn:hover{background:#f1f5f9}
   .error{background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);
-         border-radius:8px;padding:10px 14px;color:#f87171;font-size:13px;margin-bottom:16px;display:none}
+         border-radius:8px;padding:10px 14px;color:#f87171;font-size:13px;
+         margin-bottom:20px;display:none}
+  .divider{border:none;border-top:1px solid #334155;margin:28px 0}
+  .note{font-size:12px;color:#475569}
 </style>
 </head>
 <body>
 <div class="card">
   <div class="logo">
-    <div class="logo-icon">
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 105" width="80" height="42">
-        <path d="M 0,105 A 100,100 0 0,1 200,105 L 156,105 A 56,56 0 0,0 44,105 Z" fill="#E8423A"/>
-        <defs><path id="lta" d="M 22,105 A 78,78 0 0,1 178,105"/></defs>
-        <text fill="white" font-family="Arial Black,Arial,sans-serif" font-weight="900" font-size="20" letter-spacing="1.5">
-          <textPath href="#lta" startOffset="50%" text-anchor="middle">HUNGRYROOT</textPath>
-        </text>
-      </svg>
-    </div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 105" width="80" height="42">
+      <path d="M 0,105 A 100,100 0 0,1 200,105 L 156,105 A 56,56 0 0,0 44,105 Z" fill="#E8423A"/>
+      <defs><path id="lta" d="M 22,105 A 78,78 0 0,1 178,105"/></defs>
+      <text fill="white" font-family="Arial Black,Arial,sans-serif" font-weight="900" font-size="20" letter-spacing="1.5">
+        <textPath href="#lta" startOffset="50%" text-anchor="middle">HUNGRYROOT</textPath>
+      </text>
+    </svg>
     <div class="logo-text">
       <h1>Hungryroot IT Dashboard</h1>
       <p>Hungryroot · IT Device Management</p>
     </div>
   </div>
-  <div class="error" id="err">Invalid username or password.</div>
-  <form method="POST" action="/auth/login">
-    <label>Username</label>
-    <input type="text" name="username" autocomplete="username" autofocus required>
-    <label>Password</label>
-    <input type="password" name="password" autocomplete="current-password" required>
-    <button type="submit">Sign in</button>
-  </form>
+  <div class="error" id="err">Access denied. Your account is not authorized.</div>
+  <p class="subtitle">Sign in with your Hungryroot Google account to continue.</p>
+  <a href="/auth/google" class="google-btn">
+    <svg width="20" height="20" viewBox="0 0 48 48">
+      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+    </svg>
+    Sign in with Google
+  </a>
+  <hr class="divider">
+  <p class="note">Access is restricted to authorized Hungryroot IT staff.</p>
 </div>
 <script>
   const p = new URLSearchParams(location.search);
@@ -4866,6 +4914,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._redirect("/login", clear_session=True)
             return
 
+        if self.path == "/auth/google":
+            state = str(uuid.uuid4())
+            with _oauth_states_lock:
+                # Clean up old states
+                now = time.time()
+                expired = [k for k, v in _oauth_states.items() if now > v]
+                for k in expired:
+                    del _oauth_states[k]
+                _oauth_states[state] = now + 600  # 10 min TTL
+            self._redirect(_google_oauth_url(state))
+            return
+
+        if self.path.startswith("/auth/google/callback"):
+            from urllib.parse import urlparse, parse_qs
+            qs    = parse_qs(urlparse(self.path).query)
+            code  = qs.get("code",  [""])[0]
+            state = qs.get("state", [""])[0]
+            error = qs.get("error", [""])[0]
+            if error or not code:
+                self._redirect("/login?error=1")
+                return
+            # Validate state (CSRF protection)
+            with _oauth_states_lock:
+                expiry = _oauth_states.pop(state, None)
+            if not expiry or time.time() > expiry:
+                self._redirect("/login?error=1")
+                return
+            # Exchange code for user info
+            email, name = _google_exchange_code(code)
+            if not email or email not in ALLOWED_EMAILS:
+                print(f"[OAuth] Blocked login attempt: {email!r}")
+                self._redirect("/login?error=1")
+                return
+            # Create session
+            token = _create_session(email)
+            _refresh_flag.set()
+            self._set_session_cookie(token)
+            _log_activity(email, "Logged in via Google", cfg=self._cfg())
+            self._redirect("/")
+            return
+
         # ── All other routes require auth ─────────────────────────────────────
         if self._require_auth():
             return
@@ -5063,17 +5152,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/me":
             token = self._get_cookie("session")
-            me = _get_session_username(token)
-            must_change = False
-            if me:
-                for u in _load_users():
-                    if u["username"] == me:
-                        must_change = bool(u.get("must_change_password", False))
-                        break
+            me    = _get_session_username(token)
             self._json_response({
-                "username":            me or "",
-                "is_admin":            _is_admin(me) if me else False,
-                "must_change_password": must_change,
+                "username":             me or "",
+                "is_admin":             _is_admin(me) if me else False,
+                "must_change_password": False,
             })
 
         elif self.path == "/api/admin/users":
@@ -5114,27 +5197,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        # ── Login form submission ─────────────────────────────────────────────
-        if self.path == "/auth/login":
-            length = int(self.headers.get("Content-Length", 0))
-            body   = self.rfile.read(length).decode()
-            params = {}
-            for part in body.split("&"):
-                k, _, v = part.partition("=")
-                params[urllib.parse.unquote_plus(k)] = urllib.parse.unquote_plus(v)
-            username = params.get("username", "")
-            password = params.get("password", "")
-            if _check_credentials(username, password):
-                token = _create_session(username)
-                # Kick off a background refresh so the dashboard shows fresh data
-                _refresh_flag.set()
-                self._set_session_cookie(token)
-                ip = self.client_address[0]
-                _log_activity(username, "Logged in", detail=f"IP {ip}", cfg=self._cfg())
-            else:
-                self._redirect("/login?error=1")
-            return
-
         # All other POST routes require auth
         if self._require_auth():
             return
