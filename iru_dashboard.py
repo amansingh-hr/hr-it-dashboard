@@ -1158,6 +1158,50 @@ def _find_cursor(email):
     return result
 
 
+def _termination_sheets_append(entry, cfg=None):
+    """Append one termination row to the 'Termination Log' Google Sheet tab."""
+    try:
+        sa_json  = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or (cfg or {}).get("google_service_account_json", "")
+        sheet_id = os.environ.get("GOOGLE_SHEET_ID")             or (cfg or {}).get("google_sheet_id", "")
+        if not sa_json or not sheet_id:
+            return
+        service = _get_sheets_service(sa_json)
+        _ensure_sheet_tab(service, sheet_id, "Termination Log")
+        api = service.spreadsheets().values()
+        existing = api.get(spreadsheetId=sheet_id, range="Termination Log!A1:A1").execute().get("values", [])
+        if not existing:
+            api.append(
+                spreadsheetId=sheet_id, range="Termination Log!A:F",
+                valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+                body={"values": [["Timestamp", "Actor", "Employee Email", "Datadog", "Braze", "Databricks", "Pingboard", "Cursor"]]},
+            ).execute()
+        results_by_app = {r.get("app", ""): r for r in entry.get("results", [])}
+        def status(app):
+            r = results_by_app.get(app, {})
+            if r.get("deactivated"):  return "Deactivated"
+            if r.get("manual"):       return "Manual required"
+            if r.get("found"):        return "Found (error)"
+            if r.get("error") == "Credentials not configured": return "Skipped"
+            if r.get("error"):        return "Error: " + str(r["error"])[:60]
+            return "Not found"
+        api.append(
+            spreadsheetId=sheet_id, range="Termination Log!A:H",
+            valueInputOption="RAW", insertDataOption="INSERT_ROWS",
+            body={"values": [[
+                entry.get("timestamp", ""),
+                entry.get("actor", ""),
+                entry.get("email", ""),
+                status("Datadog"),
+                status("Braze"),
+                status("Databricks"),
+                status("Pingboard"),
+                status("Cursor"),
+            ]]},
+        ).execute()
+    except Exception as exc:
+        print(f"[Termination sheet error] {exc}", flush=True)
+
+
 def _run_termination(email, actor="system"):
     """Run full termination workflow for email across all apps. Returns log entry."""
     tasks = [
@@ -1187,6 +1231,7 @@ def _run_termination(email, actor="system"):
         "results":   results,
     }
     _append_term_log(entry)
+    threading.Thread(target=_termination_sheets_append, args=(entry,), daemon=True).start()
     return entry
 
 
@@ -2382,7 +2427,8 @@ HTML = """<!DOCTYPE html>
     <button class="tab" onclick="switchTab('departments', this)">🏢 By Department</button>
     <button class="tab" onclick="switchTab('onboarding', this)">🌱 Onboarding</button>
     <button class="tab" onclick="switchTab('orphaned', this)">🚨 Pending Returns</button>
-    <button class="tab" id="adminTabBtn" onclick="switchTab('admin', this)" style="margin-left:auto">🔐 Admin</button>
+    <button class="tab" id="termLogTabBtn" onclick="switchTab('termlog', this);loadTermLog()" style="margin-left:auto">🗂️ Term Log</button>
+    <button class="tab" id="adminTabBtn" onclick="switchTab('admin', this)">🔐 Admin</button>
   </div>
 
   <!-- ── Tab: Overview ── -->
@@ -4534,6 +4580,52 @@ HTML = """<!DOCTYPE html>
     document.getElementById('termReportOverlay').style.display = 'none';
   }
 
+  async function loadTermLog() {
+    const wrap = document.getElementById('termLogContent');
+    if (!wrap) return;
+    wrap.innerHTML = '<div style="color:#94a3b8;text-align:center;padding:40px">Loading...</div>';
+    try {
+      const res = await fetch('/api/termination-log');
+      const entries = await res.json();
+      if (!entries || entries.length === 0) {
+        wrap.innerHTML = '<div style="color:#94a3b8;text-align:center;padding:40px">No terminations logged yet.</div>';
+        return;
+      }
+      const APP_ORDER = ['Braze','Cursor','Datadog','Databricks','Pingboard'];
+      function statusCell(r) {
+        if (!r) return '<td style="color:#64748b;font-size:12px">—</td>';
+        if (r.deactivated) return '<td style="color:#4ade80;font-size:12px">✅ Done</td>';
+        if (r.manual)      return '<td style="color:#fbbf24;font-size:12px">⚠️ Manual</td>';
+        if (r.error === 'Credentials not configured') return '<td style="color:#64748b;font-size:12px">Skipped</td>';
+        if (r.error)       return '<td style="color:#f87171;font-size:12px" title="' + r.error + '">❌ Error</td>';
+        return '<td style="color:#64748b;font-size:12px">Not found</td>';
+      }
+      let html = '<div style="overflow-x:auto">';
+      html += '<table class="data-table" style="width:100%;min-width:700px">';
+      html += '<thead><tr>';
+      html += '<th style="text-align:left">Timestamp</th>';
+      html += '<th style="text-align:left">Employee</th>';
+      html += '<th style="text-align:left">Run by</th>';
+      APP_ORDER.forEach(function(a) { html += '<th style="text-align:center">' + a + '</th>'; });
+      html += '</tr></thead><tbody>';
+      entries.forEach(function(entry) {
+        const ts = new Date(entry.timestamp).toLocaleString();
+        const byApp = {};
+        (entry.results || []).forEach(function(r) { byApp[r.app] = r; });
+        html += '<tr>';
+        html += '<td style="font-size:12px;color:#94a3b8;white-space:nowrap">' + ts + '</td>';
+        html += '<td style="font-size:13px">' + (entry.email || '—') + '</td>';
+        html += '<td style="font-size:12px;color:#94a3b8">' + (entry.actor || '—') + '</td>';
+        APP_ORDER.forEach(function(a) { html += statusCell(byApp[a]); });
+        html += '</tr>';
+      });
+      html += '</tbody></table></div>';
+      wrap.innerHTML = html;
+    } catch(e) {
+      wrap.innerHTML = '<div style="color:#f87171;text-align:center;padding:40px">Failed to load log: ' + e.message + '</div>';
+    }
+  }
+
   async function saveDeviceReceived(email, deviceId, received) {
     await fetch('/api/offboarding/update', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -5281,6 +5373,18 @@ HTML = """<!DOCTYPE html>
       </button>
     </div>
   </div>
+</div>
+
+<!-- ── Tab: Termination Log ── -->
+<div class="tab-panel" id="tab-termlog" style="display:none;padding:28px 24px">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+    <div>
+      <h2 style="margin:0;font-size:20px;font-weight:700">🗂️ Termination Log</h2>
+      <p style="margin:4px 0 0;color:#94a3b8;font-size:13px">History of all employee terminations run through the dashboard</p>
+    </div>
+    <button onclick="loadTermLog()" style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:8px 18px;border-radius:8px;font-size:13px;cursor:pointer">↻ Refresh</button>
+  </div>
+  <div id="termLogContent" style="color:#94a3b8;text-align:center;padding:40px">Loading...</div>
 </div>
 
 <!-- ── Admin Tab Panel ── -->
