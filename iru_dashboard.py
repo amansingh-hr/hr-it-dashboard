@@ -38,7 +38,26 @@ CACHE_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iru_cach
 USERS_FILE        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_users.json")
 OFFBOARDING_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "offboarding.json")
 ACTIVITY_FILE     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "activity_log.json")
+TERMINATION_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "termination_log.json")
 MAX_ACTIVITY      = 1000
+
+# ---------------------------------------------------------------------------
+# Termination workflow — app credentials (from environment variables)
+# ---------------------------------------------------------------------------
+DATADOG_API_KEY  = os.environ.get("DATADOG_API_KEY", "")
+DATADOG_APP_KEY  = os.environ.get("DATADOG_APP_KEY", "")
+DATADOG_SITE     = os.environ.get("DATADOG_SITE", "datadoghq.com")
+
+BRAZE_API_KEY_PROD = os.environ.get("BRAZE_API_KEY_PROD", "")
+BRAZE_API_KEY_DEV  = os.environ.get("BRAZE_API_KEY_DEV", "")
+BRAZE_ENDPOINT     = os.environ.get("BRAZE_ENDPOINT", "https://rest.iad-06.braze.com")
+
+DATABRICKS_HOST  = os.environ.get("DATABRICKS_HOST", "")
+DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
+
+WORKLEAP_API_KEY = os.environ.get("WORKLEAP_API_KEY", "")
+
+CURSOR_API_KEY   = os.environ.get("CURSOR_API_KEY", "")
 PORT              = int(os.environ.get("PORT", 8080))
 CACHE_TTL   = 15 * 60   # used for staleness checks; auto-refresh is disabled (refresh on login instead)
 
@@ -899,6 +918,274 @@ def _get_dashboard_creds():
         except Exception:
             pass
     return u or "admin", p
+
+
+# ---------------------------------------------------------------------------
+# Termination log
+# ---------------------------------------------------------------------------
+_term_log_lock = threading.Lock()
+
+def _load_term_log():
+    with _term_log_lock:
+        if os.path.exists(TERMINATION_LOG_FILE):
+            try:
+                with open(TERMINATION_LOG_FILE) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return []
+
+def _save_term_log(entries):
+    with _term_log_lock:
+        with open(TERMINATION_LOG_FILE, 'w') as f:
+            json.dump(entries, f, indent=2)
+
+def _append_term_log(entry):
+    entries = _load_term_log()
+    entries.insert(0, entry)
+    entries = entries[:500]  # keep last 500
+    _save_term_log(entries)
+
+
+# ---------------------------------------------------------------------------
+# Termination workflow — per-app functions
+# ---------------------------------------------------------------------------
+
+def _http_request(method, url, headers, body=None):
+    """Generic HTTP helper used by termination functions."""
+    data = json.dumps(body).encode() if body is not None else None
+    req  = urllib.request.Request(url, data=data, method=method)
+    for k, v in headers.items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+            return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, {"error": str(e)}
+    except Exception as e:
+        return None, {"error": str(e)}
+
+
+def _terminate_datadog(email):
+    """Find and disable a Datadog user. Returns dict with status/details."""
+    result = {"app": "Datadog", "email": email, "found": False, "deactivated": False, "manual": False, "error": None}
+    if not DATADOG_API_KEY or not DATADOG_APP_KEY:
+        result["error"] = "Credentials not configured"
+        return result
+    hdrs = {"DD-API-KEY": DATADOG_API_KEY, "DD-APPLICATION-KEY": DATADOG_APP_KEY, "Content-Type": "application/json"}
+    encoded = urllib.parse.quote(email)
+    status, data = _http_request("GET", f"https://api.{DATADOG_SITE}/api/v2/users?filter={encoded}", hdrs)
+    if status != 200:
+        result["error"] = f"Lookup failed ({status})"
+        return result
+    users = data.get("data", [])
+    user  = next((u for u in users if (u.get("attributes", {}).get("email") or "").lower() == email.lower()), None)
+    if not user:
+        return result
+    result["found"] = True
+    uid = user.get("id")
+    if not uid:
+        result["error"] = "No user ID"
+        return result
+    attrs = user.get("attributes", {})
+    if attrs.get("disabled"):
+        result["deactivated"] = True
+        result["note"] = "Already disabled"
+        return result
+    status2, _ = _http_request("PATCH", f"https://api.{DATADOG_SITE}/api/v2/users/{uid}", hdrs,
+                                body={"data": {"type": "users", "id": uid, "attributes": {"disabled": True}}})
+    if status2 in (200, 204):
+        result["deactivated"] = True
+    else:
+        result["error"] = f"Disable failed ({status2})"
+    return result
+
+
+def _terminate_braze(email):
+    """Find and permanently delete user from both Braze workspaces."""
+    result = {"app": "Braze", "email": email, "found": False, "deactivated": False, "manual": False, "error": None}
+    workspaces = []
+    if BRAZE_API_KEY_PROD:
+        workspaces.append(("Prod", BRAZE_API_KEY_PROD))
+    if BRAZE_API_KEY_DEV:
+        workspaces.append(("Dev",  BRAZE_API_KEY_DEV))
+    if not workspaces:
+        result["error"] = "Credentials not configured"
+        return result
+
+    deleted_from = []
+    errors = []
+    for ws_name, api_key in workspaces:
+        hdrs = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        s, d = _http_request("POST", f"{BRAZE_ENDPOINT}/users/export/ids", hdrs,
+                              body={"email_address": email, "fields_to_export": ["external_id", "email"]})
+        if s not in (200, 201):
+            errors.append(f"{ws_name}: lookup {s}")
+            continue
+        users = d.get("users", [])
+        if not users:
+            continue
+        result["found"] = True
+        ext_ids = [u["external_id"] for u in users if u.get("external_id")]
+        if not ext_ids:
+            errors.append(f"{ws_name}: no external_id")
+            continue
+        s2, d2 = _http_request("POST", f"{BRAZE_ENDPOINT}/users/delete", hdrs,
+                                body={"external_ids": ext_ids})
+        if s2 in (200, 201):
+            deleted_from.append(ws_name)
+        else:
+            errors.append(f"{ws_name}: delete {s2}")
+
+    if deleted_from:
+        result["deactivated"] = True
+        result["note"] = f"Deleted from: {', '.join(deleted_from)}"
+    if errors:
+        result["error"] = "; ".join(errors)
+    return result
+
+
+def _terminate_databricks(email):
+    """Find and deactivate a Databricks user via SCIM."""
+    result = {"app": "Databricks", "email": email, "found": False, "deactivated": False, "manual": False, "error": None}
+    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+        result["error"] = "Credentials not configured"
+        return result
+    hdrs = {"Authorization": f"Bearer {DATABRICKS_TOKEN}", "Content-Type": "application/json"}
+    encoded = urllib.parse.quote(f'userName eq "{email}"')
+    status, data = _http_request("GET", f"{DATABRICKS_HOST}/api/2.0/preview/scim/v2/Users?filter={encoded}", hdrs)
+    if status != 200:
+        result["error"] = f"Lookup failed ({status})"
+        return result
+    resources = data.get("Resources", [])
+    if not resources:
+        return result
+    user = resources[0]
+    result["found"] = True
+    uid = user.get("id")
+    if not uid:
+        result["error"] = "No user ID"
+        return result
+    if not user.get("active", True):
+        result["deactivated"] = True
+        result["note"] = "Already inactive"
+        return result
+    status2, _ = _http_request("PATCH", f"{DATABRICKS_HOST}/api/2.0/preview/scim/v2/Users/{uid}", hdrs, body={
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [{"op": "replace", "path": "active", "value": [{"value": "false"}]}]
+    })
+    if status2 in (200, 204):
+        result["deactivated"] = True
+    else:
+        result["error"] = f"Deactivate failed ({status2})"
+    return result
+
+
+def _terminate_pingboard(email):
+    """Find and deactivate a Workleap Pingboard user."""
+    result = {"app": "Workleap Pingboard", "email": email, "found": False, "deactivated": False, "manual": False, "error": None}
+    if not WORKLEAP_API_KEY:
+        result["error"] = "Credentials not configured"
+        return result
+    hdrs = {
+        "workleap-subscription-key": WORKLEAP_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    }
+    username = email.split("@")[0]
+    status, data = _http_request("POST", "https://api.workleap.com/public/users/search", hdrs,
+                                  body={"searchTerm": username, "pageSize": 50})
+    if status != 200:
+        result["error"] = f"Search failed ({status})"
+        return result
+    users = data.get("value", data.get("users", []))
+    match = None
+    for u in users:
+        emails = u.get("emails", [])
+        if any(e.get("value", "").lower() == email.lower() for e in emails):
+            match = u
+            break
+    if not match:
+        return result
+    result["found"] = True
+    uid = match.get("id")
+    if not uid:
+        result["error"] = "No user ID"
+        return result
+    if not match.get("active", True):
+        result["deactivated"] = True
+        result["note"] = "Already inactive"
+        return result
+    status2, data2 = _http_request("POST", "https://api.workleap.com/public/users/deactivate", hdrs,
+                                    body={"userIds": [uid]})
+    if status2 == 200:
+        result["deactivated"] = True
+    else:
+        err_code = data2.get("error", {}).get("code", "") if isinstance(data2.get("error"), dict) else ""
+        if err_code == "ERR_NO_ACTIVE_MEMBERS_TO_DEACTIVATE":
+            result["deactivated"] = True
+            result["note"] = "Already inactive"
+        else:
+            result["error"] = f"Deactivate failed ({status2})"
+    return result
+
+
+def _find_cursor(email):
+    """Find a Cursor team member by email. Returns dict with found status (no removal API)."""
+    result = {"app": "Cursor", "email": email, "found": False, "deactivated": False, "manual": True,
+              "manual_url": "https://cursor.com/team", "error": None}
+    if not CURSOR_API_KEY:
+        result["error"] = "Credentials not configured"
+        return result
+    hdrs = {"Authorization": f"Bearer {CURSOR_API_KEY}", "Content-Type": "application/json"}
+    status, data = _http_request("GET", "https://api.cursor.com/teams/members", hdrs)
+    if status != 200:
+        result["error"] = f"Lookup failed ({status})"
+        return result
+    members = data.get("teamMembers", [])
+    match = next((m for m in members if (m.get("email") or "").lower() == email.lower()), None)
+    if match and not match.get("isRemoved", False):
+        result["found"] = True
+        result["note"] = "Manual removal required at cursor.com/team"
+    return result
+
+
+def _run_termination(email, actor="system"):
+    """Run full termination workflow for email across all apps. Returns log entry."""
+    import concurrent.futures
+    tasks = [
+        _terminate_datadog,
+        _terminate_braze,
+        _terminate_databricks,
+        _terminate_pingboard,
+        _find_cursor,
+    ]
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        futures = {pool.submit(fn, email): fn.__name__ for fn in tasks}
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                results.append({"app": futures[fut], "error": str(e), "found": False, "deactivated": False})
+
+    # Sort by app name for consistent display
+    results.sort(key=lambda r: r.get("app", ""))
+
+    entry = {
+        "id":        str(uuid.uuid4()),
+        "email":     email,
+        "actor":     actor,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "results":   results,
+    }
+    _append_term_log(entry)
+    return entry
 
 
 def _init_users():
@@ -3316,6 +3603,17 @@ HTML = """<!DOCTYPE html>
           <div class="profile-devices-title">Enrolled Devices (${u.devices.length})</div>
           ${deviceHTML}
         </div>
+
+        <!-- Terminate button -->
+        <div style="padding:16px 20px;border-top:1px solid #1e293b;display:flex;justify-content:flex-end">
+          <button onclick="openTerminateModal('${esc(u.email)}','${esc(u.name || u.email)}')"
+            style="background:#7f1d1d;border:1px solid #991b1b;color:#fca5a5;padding:8px 20px;border-radius:8px;
+                   font-size:13px;font-weight:600;cursor:pointer;transition:all .15s"
+            onmouseover="this.style.background='#991b1b';this.style.color='#fee2e2'"
+            onmouseout="this.style.background='#7f1d1d';this.style.color='#fca5a5'">
+            🔴 Terminate Employee
+          </button>
+        </div>
       </div>`;
   }
 
@@ -4126,6 +4424,120 @@ HTML = """<!DOCTYPE html>
     document.getElementById('offboardModal').style.display = 'none';
   }
 
+  // ── Termination Workflow ──────────────────────────────────────────────────
+  let _terminateEmail = '', _terminateName = '';
+
+  function openTerminateModal(email, name) {
+    _terminateEmail = email;
+    _terminateName  = name;
+    document.getElementById('terminateModalName').textContent  = name;
+    document.getElementById('terminateModalEmail').textContent = email;
+    document.getElementById('terminateConfirmInput').value = '';
+    document.getElementById('terminateConfirmBtn').disabled = true;
+    document.getElementById('terminateModalOverlay').style.display = 'flex';
+  }
+
+  function closeTerminateModal() {
+    document.getElementById('terminateModalOverlay').style.display = 'none';
+  }
+
+  function onTerminateInputChange() {
+    const val = document.getElementById('terminateConfirmInput').value.trim();
+    const btn = document.getElementById('terminateConfirmBtn');
+    btn.disabled    = (val !== 'TERMINATE');
+    btn.style.opacity = (val === 'TERMINATE') ? '1' : '0.5';
+    btn.style.cursor  = (val === 'TERMINATE') ? 'pointer' : 'not-allowed';
+  }
+
+  async function confirmTerminate() {
+    const btn = document.getElementById('terminateConfirmBtn');
+    btn.disabled  = true;
+    btn.textContent = 'Running…';
+    closeTerminateModal();
+    document.getElementById('terminateRunningOverlay').style.display = 'flex';
+
+    let entry;
+    try {
+      const res = await fetch('/api/terminate', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({email: _terminateEmail})
+      });
+      const data = await res.json();
+      entry = data.entry;
+    } catch(e) {
+      document.getElementById('terminateRunningOverlay').style.display = 'none';
+      alert('Termination request failed: ' + e.message);
+      return;
+    }
+
+    document.getElementById('terminateRunningOverlay').style.display = 'none';
+    showTerminateReport(entry);
+  }
+
+  function showTerminateReport(entry) {
+    const results = entry.results || [];
+    const ts = new Date(entry.timestamp).toLocaleString();
+
+    const appIcon = {
+      'Datadog':           '🐶',
+      'Braze':             '📣',
+      'Databricks':        '🧱',
+      'Workleap Pingboard':'📌',
+      'Cursor':            '✏️',
+    };
+
+    const rows = results.map(r => {
+      const icon   = appIcon[r.app] || '🔧';
+      let statusEl, badge;
+      if (r.error && !r.found && !r.deactivated) {
+        // config missing or lookup failed
+        badge = \`<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(100,116,139,.2);color:#94a3b8">Skipped</span>\`;
+        statusEl = \`<div style="font-size:11px;color:#64748b;margin-top:2px">\${esc(r.error)}</div>\`;
+      } else if (!r.found) {
+        badge = \`<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(100,116,139,.2);color:#94a3b8">Not Found</span>\`;
+        statusEl = '';
+      } else if (r.manual) {
+        badge = \`<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(245,158,11,.2);color:#fbbf24">Found — Manual</span>\`;
+        statusEl = \`<div style="font-size:11px;color:#94a3b8;margin-top:2px">Account found. Deactivate manually at <a href="\${r.manual_url||'#'}" target="_blank" style="color:#60a5fa">\${r.manual_url||r.app}</a></div>\`;
+      } else if (r.deactivated) {
+        badge = \`<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(34,197,94,.2);color:#4ade80">Deactivated</span>\`;
+        statusEl = r.note ? \`<div style="font-size:11px;color:#64748b;margin-top:2px">\${esc(r.note)}</div>\` : '';
+      } else {
+        badge = \`<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(239,68,68,.2);color:#f87171">Failed</span>\`;
+        statusEl = r.error ? \`<div style="font-size:11px;color:#f87171;margin-top:2px">\${esc(r.error)}</div>\` : '';
+      }
+      return \`
+        <div style="display:flex;align-items:flex-start;gap:14px;padding:12px 0;border-bottom:1px solid #1e293b">
+          <span style="font-size:20px;flex-shrink:0;margin-top:1px">\${icon}</span>
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:600;color:#e2e8f0">\${esc(r.app)}</div>
+            \${statusEl}
+          </div>
+          \${badge}
+        </div>\`;
+    }).join('');
+
+    // Summary counts
+    const deactivated = results.filter(r => r.deactivated && !r.manual).length;
+    const manual      = results.filter(r => r.manual && r.found).length;
+    const notFound    = results.filter(r => !r.found).length;
+
+    document.getElementById('termReportTitle').textContent = _terminateName || _terminateEmail;
+    document.getElementById('termReportEmail').textContent = _terminateEmail;
+    document.getElementById('termReportTime').textContent  = ts;
+    document.getElementById('termReportRows').innerHTML    = rows;
+    document.getElementById('termReportSummary').innerHTML =
+      \`<span style="color:#4ade80;font-weight:600">\${deactivated} deactivated</span>
+       \${manual > 0 ? \` · <span style="color:#fbbf24;font-weight:600">\${manual} manual action needed</span>\` : ''}
+       · <span style="color:#94a3b8">\${notFound} not found</span>\`;
+
+    document.getElementById('termReportOverlay').style.display = 'flex';
+  }
+
+  function closeTermReport() {
+    document.getElementById('termReportOverlay').style.display = 'none';
+  }
+
   async function saveDeviceReceived(email, deviceId, received) {
     await fetch('/api/offboarding/update', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -4789,6 +5201,92 @@ HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<!-- ── Terminate Confirmation Modal ── -->
+<div id="terminateModalOverlay" onclick="if(event.target===this)closeTerminateModal()"
+     style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1200;align-items:center;justify-content:center;padding:16px">
+  <div onclick="event.stopPropagation()"
+       style="background:#0f172a;border:1px solid #7f1d1d;border-radius:14px;width:100%;max-width:480px;box-shadow:0 24px 80px rgba(0,0,0,.7);overflow:hidden">
+    <div style="padding:24px 24px 0">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+        <div style="width:40px;height:40px;border-radius:50%;background:#7f1d1d;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+          <span style="font-size:18px">🔴</span>
+        </div>
+        <div>
+          <div style="font-size:16px;font-weight:700;color:#fca5a5">Terminate Employee</div>
+          <div style="font-size:12px;color:#64748b;margin-top:2px">This will deactivate accounts across all integrated apps</div>
+        </div>
+      </div>
+      <div style="background:#1e293b;border-radius:10px;padding:14px 16px;margin-bottom:18px">
+        <div style="font-size:14px;font-weight:600;color:#e2e8f0" id="terminateModalName"></div>
+        <div style="font-size:12px;color:#64748b;margin-top:2px" id="terminateModalEmail"></div>
+      </div>
+      <div style="font-size:12px;color:#94a3b8;margin-bottom:8px">
+        The following apps will be processed: <span style="color:#e2e8f0">Datadog, Braze, Databricks, Workleap Pingboard, Cursor</span>
+      </div>
+      <div style="font-size:12px;color:#94a3b8;margin-bottom:16px">
+        Type <strong style="color:#fca5a5">TERMINATE</strong> to confirm:
+      </div>
+      <input type="text" id="terminateConfirmInput" placeholder="Type TERMINATE to confirm"
+        oninput="onTerminateInputChange()"
+        style="width:100%;box-sizing:border-box;background:#1e293b;border:1px solid #7f1d1d;border-radius:8px;
+               padding:10px 12px;color:#f1f5f9;font-size:13px;outline:none;margin-bottom:18px"
+        onfocus="this.style.borderColor='#ef4444'" onblur="this.style.borderColor='#7f1d1d'">
+    </div>
+    <div style="padding:0 24px 24px;display:flex;gap:10px;justify-content:flex-end">
+      <button onclick="closeTerminateModal()"
+        style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:9px 20px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">
+        Cancel
+      </button>
+      <button id="terminateConfirmBtn" onclick="confirmTerminate()" disabled
+        style="background:#991b1b;border:1px solid #b91c1c;color:#fff;padding:9px 20px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;opacity:.5;transition:opacity .15s"
+        onmouseover="if(!this.disabled)this.style.background='#b91c1c'"
+        onmouseout="if(!this.disabled)this.style.background='#991b1b'">
+        Run Termination
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Termination Running Spinner ── -->
+<div id="terminateRunningOverlay"
+     style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1300;align-items:center;justify-content:center">
+  <div style="text-align:center">
+    <div style="font-size:36px;margin-bottom:16px;animation:spin 1s linear infinite">⚙️</div>
+    <div style="font-size:15px;font-weight:600;color:#e2e8f0">Running termination workflow…</div>
+    <div style="font-size:12px;color:#64748b;margin-top:6px">Deactivating accounts across apps</div>
+  </div>
+</div>
+
+<!-- ── Termination Report Modal ── -->
+<div id="termReportOverlay" onclick="if(event.target===this)closeTermReport()"
+     style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1200;align-items:center;justify-content:center;padding:16px">
+  <div onclick="event.stopPropagation()"
+       style="background:#0f172a;border:1px solid #1e293b;border-radius:14px;width:100%;max-width:540px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.7);overflow:hidden">
+    <!-- Header -->
+    <div style="padding:22px 24px 16px;border-bottom:1px solid #1e293b">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between">
+        <div>
+          <div style="font-size:16px;font-weight:700;color:#e2e8f0" id="termReportTitle"></div>
+          <div style="font-size:12px;color:#64748b;margin-top:2px" id="termReportEmail"></div>
+          <div style="font-size:11px;color:#475569;margin-top:4px" id="termReportTime"></div>
+        </div>
+        <button onclick="closeTermReport()"
+          style="background:none;border:none;color:#475569;font-size:20px;cursor:pointer;padding:0;line-height:1">✕</button>
+      </div>
+      <div style="margin-top:12px;font-size:12px" id="termReportSummary"></div>
+    </div>
+    <!-- App results -->
+    <div style="padding:4px 24px 8px;overflow-y:auto;flex:1" id="termReportRows"></div>
+    <!-- Footer -->
+    <div style="padding:16px 24px;border-top:1px solid #1e293b;display:flex;justify-content:flex-end">
+      <button onclick="closeTermReport()"
+        style="background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:9px 22px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">
+        Close
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Admin Tab Panel ── -->
 <div class="tab-panel" id="tab-admin" style="display:none;padding:32px 24px;max-width:800px;margin:0 auto">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px">
@@ -5149,6 +5647,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             data = _load_offboarding()
             self._json_response(data.get(email, {}))
 
+        elif self.path == "/api/termination-log":
+            if self._require_login(): return
+            self._json_response(_load_term_log())
+
         elif self.path == "/api/admin/activity":
             entries = []
             if os.path.exists(ACTIVITY_FILE):
@@ -5414,6 +5916,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             _users_sheets_sync_bg(DashboardHandler.config or {})
             _log_activity(self._actor(), "Changed password for user", target=target, cfg=self._cfg())
             self._json_response({"ok": True})
+
+        elif self.path == "/api/terminate":
+            if self._require_login(): return
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length).decode())
+            email  = body.get("email", "").strip().lower()
+            if not email:
+                self._json_response({"ok": False, "error": "email required"}, status=400)
+                return
+            actor = self._actor()
+            entry = _run_termination(email, actor=actor)
+            _log_activity(actor, "Employee termination", target=email, cfg=self._cfg())
+            self._json_response({"ok": True, "entry": entry})
 
         elif self.path == "/api/onboarding/checklist/bulk":
             length = int(self.headers.get("Content-Length", 0))
