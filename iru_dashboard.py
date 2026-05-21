@@ -3785,8 +3785,8 @@ HTML = """<!DOCTYPE html>
       listEl.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
         apps.map(function(a) {
           const logo = a.logoUrl
-            ? '<img src="' + a.logoUrl + '" style="width:18px;height:18px;border-radius:3px;object-fit:contain;flex-shrink:0" onerror="this.style.display=\'none\'">'
-            : '<span style="font-size:14px">🔗</span>';
+            ? '<img src="' + a.logoUrl + '" width="18" height="18" style="border-radius:3px;object-fit:contain;flex-shrink:0">'
+            : '<span>&#128279;</span>';
           return '<div style="display:flex;align-items:center;gap:6px;background:#1e293b;border:1px solid #334155;' +
             'border-radius:6px;padding:5px 10px;font-size:12px;color:#cbd5e1">' +
             logo + '<span>' + esc(a.label) + '</span></div>';
