@@ -62,7 +62,7 @@ WORKLEAP_API_KEY = os.environ.get("WORKLEAP_API_KEY", "")
 CURSOR_API_KEY   = os.environ.get("CURSOR_API_KEY", "")
 
 OKTA_DOMAIN    = os.environ.get("OKTA_DOMAIN", "hungryroot.okta.com")
-OKTA_API_TOKEN = os.environ.get("OKTA_API_TOKEN", "")
+OKTA_API_TOKEN = os.environ.get("OKTA_TOKEN", "") or os.environ.get("OKTA_API_TOKEN", "")
 PORT              = int(os.environ.get("PORT", 8080))
 CACHE_TTL   = 15 * 60   # used for staleness checks; auto-refresh is disabled (refresh on login instead)
 
