@@ -926,9 +926,38 @@ def _init_users():
         print(f"[Auth] Migrated user '{u_old}' to dashboard_users.json")
 
 
-def _is_admin(username):
-    """All allowed users are admins."""
-    return (username or "").lower() in ALLOWED_EMAILS
+def _is_admin(email):
+    """Return True if the given email has admin privileges."""
+    if not email:
+        return False
+    email = email.lower()
+    for u in _load_users():
+        if u.get("email", "").lower() == email:
+            return bool(u.get("is_admin", False))
+    return False
+
+
+def _is_allowed_email(email):
+    """Return True if the email is in the allowed users list."""
+    if not email:
+        return False
+    email = email.lower()
+    return any(u.get("email", "").lower() == email for u in _load_users())
+
+
+def _seed_default_users():
+    """Seed dashboard_users.json with default admins if no email-based users exist."""
+    users = _load_users()
+    # Check if any user has an 'email' field (new format)
+    has_email_users = any("email" in u for u in users)
+    if not has_email_users:
+        import datetime
+        today = datetime.date.today().isoformat()
+        _save_users([
+            {"email": "aman.singh@hungryroot.com",  "is_admin": True, "created_at": today},
+            {"email": "rory.boyle@hungryroot.com",  "is_admin": True, "created_at": today},
+        ])
+        print("[Auth] Seeded default admin users.")
 
 
 def _create_session(username):
@@ -4539,7 +4568,7 @@ HTML = """<!DOCTYPE html>
 
   // ── Admin Tab ─────────────────────────────────────────────────────────────
   async function loadAdminTab() {
-    const wrap = document.getElementById('adminUsersWrap');
+    const wrap   = document.getElementById('adminUsersWrap');
     const addBtn = document.getElementById('adminAddBtn');
     if (!currentUser.is_admin) {
       wrap.innerHTML = '<div style="color:#94a3b8;padding:20px;text-align:center;border:1px solid #1e293b;border-radius:10px">🔒 You need admin privileges to manage users.</div>';
@@ -4549,7 +4578,7 @@ HTML = """<!DOCTYPE html>
     if (addBtn) addBtn.style.display = '';
     wrap.innerHTML = '<div style="color:#64748b;padding:20px">Loading...</div>';
     try {
-      const res  = await fetch('/api/admin/users');
+      const res   = await fetch('/api/admin/users');
       const users = await res.json();
       if (!users.length) {
         wrap.innerHTML = '<div style="color:#64748b;padding:20px">No users found.</div>';
@@ -4558,15 +4587,15 @@ HTML = """<!DOCTYPE html>
       wrap.innerHTML = `
         <table class="data-table" style="width:100%;max-width:700px">
           <thead><tr>
-            <th>Username</th>
+            <th>Email</th>
             <th>Role</th>
-            <th>Created</th>
-            <th style="width:260px">Actions</th>
+            <th>Added</th>
+            <th style="width:180px">Actions</th>
           </tr></thead>
           <tbody>
           ${users.map(u => `
             <tr>
-              <td style="font-weight:500">${esc(u.username)}${u.is_me ? ' <span style="font-size:11px;color:#64748b">(you)</span>' : ''}</td>
+              <td style="font-weight:500">${esc(u.email)}${u.is_me ? ' <span style="font-size:11px;color:#64748b">(you)</span>' : ''}</td>
               <td>
                 <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;
                   background:${u.is_admin ? 'rgba(59,130,246,.2)' : 'rgba(100,116,139,.15)'};
@@ -4576,15 +4605,16 @@ HTML = """<!DOCTYPE html>
               </td>
               <td style="color:#64748b;font-size:13px">${u.created_at ? u.created_at.slice(0,10) : '—'}</td>
               <td style="display:flex;gap:6px;flex-wrap:wrap">
-                ${u.is_me
-                  ? `<button class="btn btn-secondary" style="font-size:12px;padding:4px 10px"
-                      onclick="adminChangePass('${esc(u.username)}')">Change Password</button>`
-                  : `<button class="btn btn-secondary" style="font-size:12px;padding:4px 10px"
-                      onclick="adminResetPass('${esc(u.username)}')">Reset Password</button>
-                    <button class="btn btn-secondary" style="font-size:12px;padding:4px 10px;background:${u.is_admin ? 'rgba(245,158,11,.15)' : 'rgba(59,130,246,.15)'};color:${u.is_admin ? '#f59e0b' : '#60a5fa'};border-color:${u.is_admin ? '#f59e0b' : '#3b82f6'}"
-                      onclick="adminToggleAdmin('${esc(u.username)}', ${u.is_admin})">${u.is_admin ? 'Remove Admin' : 'Make Admin'}</button>
-                    <button class="btn" style="font-size:12px;padding:4px 10px;background:#ef4444;color:#fff"
-                      onclick="adminDeleteUser('${esc(u.username)}')">Remove</button>`}
+                ${u.is_me ? '' : `
+                  <button class="btn btn-secondary" style="font-size:12px;padding:4px 10px;
+                    background:${u.is_admin ? 'rgba(245,158,11,.15)' : 'rgba(59,130,246,.15)'};
+                    color:${u.is_admin ? '#f59e0b' : '#60a5fa'};
+                    border-color:${u.is_admin ? '#f59e0b' : '#3b82f6'}"
+                    onclick="adminToggleAdmin('${esc(u.email)}', ${u.is_admin})">
+                    ${u.is_admin ? 'Remove Admin' : 'Make Admin'}
+                  </button>
+                  <button class="btn" style="font-size:12px;padding:4px 10px;background:#ef4444;color:#fff"
+                    onclick="adminDeleteUser('${esc(u.email)}')">Remove</button>`}
               </td>
             </tr>`).join('')}
           </tbody>
@@ -4592,7 +4622,6 @@ HTML = """<!DOCTYPE html>
     } catch(e) {
       wrap.innerHTML = `<div style="color:#f87171">Error: ${e.message}</div>`;
     }
-    // Load activity log below users table
     loadActivityLog();
   }
 
@@ -4653,9 +4682,8 @@ HTML = """<!DOCTYPE html>
   }
 
   function openAddUserModal() {
-    document.getElementById('addUserStep1').style.display = '';
-    document.getElementById('addUserStep2').style.display = 'none';
     document.getElementById('addUserEmail').value = '';
+    document.getElementById('addUserIsAdmin').checked = false;
     document.getElementById('addUserError').textContent = '';
     document.getElementById('addUserModal').style.display = 'flex';
     setTimeout(() => document.getElementById('addUserEmail').focus(), 50);
@@ -4667,20 +4695,17 @@ HTML = """<!DOCTYPE html>
   }
 
   async function submitAddUser() {
-    const email = document.getElementById('addUserEmail').value.trim().toLowerCase();
-    const errEl = document.getElementById('addUserError');
+    const email    = document.getElementById('addUserEmail').value.trim();
+    const is_admin = document.getElementById('addUserIsAdmin').checked;
+    const errEl    = document.getElementById('addUserError');
     errEl.textContent = '';
-    if (!email) { errEl.textContent = 'Email is required.'; return; }
-    if (!email.includes('@')) { errEl.textContent = 'Please enter a valid email address.'; return; }
-    const res  = await fetch('/api/admin/users/add', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email})});
+    if (!email || !email.includes('@')) { errEl.textContent = 'Please enter a valid email.'; return; }
+    const res  = await fetch('/api/admin/users/add', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email, is_admin})});
     const data = await res.json();
     if (data.ok) {
-      document.getElementById('addUserResultEmail').textContent = email;
-      document.getElementById('addUserResultPass').textContent  = data.temp_password;
-      document.getElementById('addUserStep1').style.display = 'none';
-      document.getElementById('addUserStep2').style.display = '';
+      closeAddUserModal();
     } else {
-      errEl.textContent = data.error || 'Error creating user.';
+      errEl.textContent = data.error || 'Error granting access.';
     }
   }
 
@@ -4710,18 +4735,18 @@ HTML = """<!DOCTYPE html>
     }
   }
 
-  async function adminToggleAdmin(username, currentlyAdmin) {
+  async function adminToggleAdmin(email, currentlyAdmin) {
     const action = currentlyAdmin ? 'remove admin from' : 'make admin';
-    if (!confirm(`Are you sure you want to ${action} '${username}'?`)) return;
-    const res  = await fetch('/api/admin/users/toggle-admin', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username})});
+    if (!confirm(`Are you sure you want to ${action} '${email}'?`)) return;
+    const res  = await fetch('/api/admin/users/toggle-admin', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email})});
     const data = await res.json();
     if (data.ok) { loadAdminTab(); }
     else { alert(data.error || 'Error updating role.'); }
   }
 
-  async function adminDeleteUser(username) {
-    if (!confirm(`Remove user '${username}'? They will no longer be able to log in.`)) return;
-    const res  = await fetch('/api/admin/users/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username})});
+  async function adminDeleteUser(email) {
+    if (!confirm(`Remove '${email}'? They will no longer be able to log in.`)) return;
+    const res  = await fetch('/api/admin/users/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email})});
     const data = await res.json();
     if (data.ok) { loadAdminTab(); }
     else { alert(data.error || 'Error removing user.'); }
@@ -4783,34 +4808,19 @@ HTML = """<!DOCTYPE html>
 <!-- ── Add User Modal ── -->
 <div id="addUserModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:2000;align-items:center;justify-content:center;padding:16px">
   <div style="background:#0f172a;border-radius:14px;width:100%;max-width:440px;padding:28px;box-shadow:0 24px 80px rgba(0,0,0,.7);border:1px solid #1e293b">
-    <div id="addUserStep1">
-      <h3 style="font-size:16px;font-weight:600;margin:0 0 6px">Add New User</h3>
-      <p style="color:#64748b;font-size:13px;margin:0 0 20px">Enter the user's email address. A temporary password will be generated for them to use on first login.</p>
-      <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px">Email Address</label>
-      <input type="email" id="addUserEmail" placeholder="jane@hungryroot.com"
-        style="width:100%;box-sizing:border-box;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;color:#f1f5f9;font-size:14px;margin-bottom:16px"
-        onkeydown="if(event.key==='Enter')submitAddUser()">
-      <div id="addUserError" style="color:#f87171;font-size:13px;min-height:18px;margin-bottom:12px"></div>
-      <div style="display:flex;gap:10px;justify-content:flex-end">
-        <button class="btn btn-secondary" onclick="closeAddUserModal()" style="padding:8px 18px;font-size:13px">Cancel</button>
-        <button class="btn" onclick="submitAddUser()" style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px">Create User</button>
-      </div>
-    </div>
-    <div id="addUserStep2" style="display:none;text-align:center">
-      <div style="font-size:36px;margin-bottom:12px">✅</div>
-      <h3 style="font-size:16px;font-weight:600;margin:0 0 8px">User Created</h3>
-      <p style="color:#64748b;font-size:13px;margin:0 0 20px">Share these credentials with the user. They will be prompted to set a new password on first login.</p>
-      <div style="background:#1e293b;border-radius:8px;padding:16px;text-align:left;margin-bottom:20px">
-        <div style="font-size:12px;color:#94a3b8;margin-bottom:4px">Email / Username</div>
-        <div id="addUserResultEmail" style="font-size:14px;font-weight:600;color:#f1f5f9;margin-bottom:12px"></div>
-        <div style="font-size:12px;color:#94a3b8;margin-bottom:4px">Temporary Password</div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <code id="addUserResultPass" style="font-size:16px;font-weight:700;color:#60a5fa;letter-spacing:1px;flex:1"></code>
-          <button class="btn btn-secondary" onclick="copyTempPass()" style="font-size:11px;padding:4px 10px">Copy</button>
-        </div>
-      </div>
-      <p style="color:#f59e0b;font-size:12px;margin:0 0 20px">⚠️ This password will not be shown again. Copy it now.</p>
-      <button class="btn" onclick="closeAddUserModal()" style="background:#3b82f6;color:#fff;padding:8px 24px;font-size:13px">Done</button>
+    <h3 style="font-size:16px;font-weight:600;margin:0 0 6px">Grant Access</h3>
+    <p style="color:#64748b;font-size:13px;margin:0 0 20px">Enter the user's Hungryroot Google email. They'll be able to sign in with Google once added.</p>
+    <label style="font-size:12px;color:#94a3b8;display:block;margin-bottom:6px">Email Address</label>
+    <input type="email" id="addUserEmail" placeholder="jane@hungryroot.com"
+      style="width:100%;box-sizing:border-box;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:10px 12px;color:#f1f5f9;font-size:14px;margin-bottom:8px"
+      onkeydown="if(event.key==='Enter')submitAddUser()">
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#94a3b8;margin-bottom:16px;cursor:pointer">
+      <input type="checkbox" id="addUserIsAdmin" style="width:auto;margin:0"> Grant admin privileges
+    </label>
+    <div id="addUserError" style="color:#f87171;font-size:13px;min-height:18px;margin-bottom:12px"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button class="btn btn-secondary" onclick="closeAddUserModal()" style="padding:8px 18px;font-size:13px">Cancel</button>
+      <button class="btn" onclick="submitAddUser()" style="background:#3b82f6;color:#fff;padding:8px 18px;font-size:13px">Grant Access</button>
     </div>
   </div>
 </div>
@@ -4943,7 +4953,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             # Exchange code for user info
             email, name = _google_exchange_code(code)
-            if not email or email not in ALLOWED_EMAILS:
+            if not email or not _is_allowed_email(email):
                 print(f"[OAuth] Blocked login attempt: {email!r}")
                 self._redirect("/login?error=1")
                 return
@@ -5161,16 +5171,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/admin/users":
             token = self._get_cookie("session")
-            me = _get_session_username(token)
+            me    = (_get_session_username(token) or "").lower()
             users = _load_users()
             self._json_response([
                 {
-                    "username":   u["username"],
+                    "email":      u.get("email", u.get("username", "")),
                     "created_at": u.get("created_at", ""),
-                    "is_me":      u["username"] == me,
+                    "is_me":      u.get("email", u.get("username", "")).lower() == me,
                     "is_admin":   bool(u.get("is_admin", False)),
                 }
-                for u in users
+                for u in users if u.get("email") or u.get("username")
             ])
 
         elif self.path.startswith("/api/onboarding/detail"):
@@ -5288,41 +5298,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/admin/users/add":
             if self._require_admin(): return
-            length = int(self.headers.get("Content-Length", 0))
-            body   = json.loads(self.rfile.read(length))
-            new_user = body.get("email", "").strip().lower()
-            if not new_user:
-                self._json_response({"ok": False, "error": "Email is required."})
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            email    = (body.get("email") or "").strip().lower()
+            is_admin = bool(body.get("is_admin", False))
+            if not email or "@" not in email:
+                self._json_response({"ok": False, "error": "Valid email required."}, status=400)
                 return
             users = _load_users()
-            if any(u["username"] == new_user for u in users):
-                self._json_response({"ok": False, "error": f"User '{new_user}' already exists."})
+            if any(u.get("email", "").lower() == email for u in users):
+                self._json_response({"ok": False, "error": "User already exists."}, status=400)
                 return
-            temp_pass = _generate_temp_password()
-            users.append({
-                "username":             new_user,
-                "password_hash":        _hash_password(temp_pass),
-                "is_admin":             False,
-                "must_change_password": True,
-                "created_at":           time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            })
+            import datetime
+            users.append({"email": email, "is_admin": is_admin, "created_at": datetime.date.today().isoformat()})
             _save_users(users)
-            _users_sheets_sync_bg(DashboardHandler.config or {})
-            _log_activity(self._actor(), "Added user", target=new_user, cfg=self._cfg())
-            self._json_response({"ok": True, "temp_password": temp_pass})
+            me = self._actor()
+            _log_activity(me, "Added user", detail=email, cfg=self._cfg())
+            self._json_response({"ok": True})
 
         elif self.path == "/api/admin/users/delete":
             if self._require_admin(): return
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
-            target = body.get("username", "").strip()
+            email  = (body.get("email") or body.get("username", "")).lower()
             token  = self._get_cookie("session")
-            me     = _get_session_username(token)
-            if target == me:
+            me     = (_get_session_username(token) or "").lower()
+            if email == me:
                 self._json_response({"ok": False, "error": "You cannot delete your own account."})
                 return
             users = _load_users()
-            updated = [u for u in users if u["username"] != target]
+            updated = [u for u in users if u.get("email", u.get("username","")).lower() != email]
             if len(updated) == len(users):
                 self._json_response({"ok": False, "error": "User not found."})
                 return
@@ -5331,23 +5335,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             _save_users(updated)
             _users_sheets_sync_bg(DashboardHandler.config or {})
-            _log_activity(self._actor(), "Removed user", target=target, cfg=self._cfg())
+            _log_activity(self._actor(), "Removed user", target=email, cfg=self._cfg())
             self._json_response({"ok": True})
 
         elif self.path == "/api/admin/users/toggle-admin":
             if self._require_admin(): return
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length))
-            target = body.get("username", "").strip()
+            email  = (body.get("email") or body.get("username", "")).lower()
             token  = self._get_cookie("session")
-            me     = _get_session_username(token)
-            if target == me:
+            me     = (_get_session_username(token) or "").lower()
+            if email == me:
                 self._json_response({"ok": False, "error": "You cannot change your own admin status."})
                 return
             users = _load_users()
             found = False
             for u in users:
-                if u["username"] == target:
+                if u.get("email", u.get("username","")).lower() == email:
                     u["is_admin"] = not bool(u.get("is_admin", False))
                     found = True
                     break
@@ -5356,8 +5360,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             _save_users(users)
             _users_sheets_sync_bg(DashboardHandler.config or {})
-            new_role = "Admin" if next((u["is_admin"] for u in users if u["username"] == target), False) else "Viewer"
-            _log_activity(self._actor(), f"Set role to {new_role}", target=target, cfg=self._cfg())
+            new_role = "Admin" if next((u["is_admin"] for u in users if u.get("email", u.get("username","")).lower() == email), False) else "Viewer"
+            _log_activity(self._actor(), f"Set role to {new_role}", target=email, cfg=self._cfg())
             self._json_response({"ok": True})
 
         elif self.path == "/api/admin/users/reset-password":
@@ -5565,6 +5569,9 @@ def main():
 
     # Migrate single-user config to multi-user users file (no-op if already done)
     _init_users()
+
+    # Seed default admin users if no email-based users exist
+    _seed_default_users()
 
     # Load cached data from disk so first page load is instant
     _load_cache_from_disk()
