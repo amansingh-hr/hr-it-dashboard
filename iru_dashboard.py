@@ -4490,31 +4490,25 @@ HTML = """<!DOCTYPE html>
       const icon   = appIcon[r.app] || '🔧';
       let statusEl, badge;
       if (r.error && !r.found && !r.deactivated) {
-        // config missing or lookup failed
-        badge = \`<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(100,116,139,.2);color:#94a3b8">Skipped</span>\`;
-        statusEl = \`<div style="font-size:11px;color:#64748b;margin-top:2px">\${esc(r.error)}</div>\`;
+        badge    = '<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(100,116,139,.2);color:#94a3b8">Skipped</span>';
+        statusEl = '<div style="font-size:11px;color:#64748b;margin-top:2px">' + esc(r.error) + '</div>';
       } else if (!r.found) {
-        badge = \`<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(100,116,139,.2);color:#94a3b8">Not Found</span>\`;
+        badge    = '<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(100,116,139,.2);color:#94a3b8">Not Found</span>';
         statusEl = '';
       } else if (r.manual) {
-        badge = \`<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(245,158,11,.2);color:#fbbf24">Found — Manual</span>\`;
-        statusEl = \`<div style="font-size:11px;color:#94a3b8;margin-top:2px">Account found. Deactivate manually at <a href="\${r.manual_url||'#'}" target="_blank" style="color:#60a5fa">\${r.manual_url||r.app}</a></div>\`;
+        badge    = '<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(245,158,11,.2);color:#fbbf24">Found — Manual</span>';
+        statusEl = '<div style="font-size:11px;color:#94a3b8;margin-top:2px">Account found. Deactivate manually at <a href="' + (r.manual_url||'#') + '" target="_blank" style="color:#60a5fa">' + esc(r.manual_url||r.app) + '</a></div>';
       } else if (r.deactivated) {
-        badge = \`<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(34,197,94,.2);color:#4ade80">Deactivated</span>\`;
-        statusEl = r.note ? \`<div style="font-size:11px;color:#64748b;margin-top:2px">\${esc(r.note)}</div>\` : '';
+        badge    = '<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(34,197,94,.2);color:#4ade80">Deactivated</span>';
+        statusEl = r.note ? '<div style="font-size:11px;color:#64748b;margin-top:2px">' + esc(r.note) + '</div>' : '';
       } else {
-        badge = \`<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(239,68,68,.2);color:#f87171">Failed</span>\`;
-        statusEl = r.error ? \`<div style="font-size:11px;color:#f87171;margin-top:2px">\${esc(r.error)}</div>\` : '';
+        badge    = '<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;background:rgba(239,68,68,.2);color:#f87171">Failed</span>';
+        statusEl = r.error ? '<div style="font-size:11px;color:#f87171;margin-top:2px">' + esc(r.error) + '</div>' : '';
       }
-      return \`
-        <div style="display:flex;align-items:flex-start;gap:14px;padding:12px 0;border-bottom:1px solid #1e293b">
-          <span style="font-size:20px;flex-shrink:0;margin-top:1px">\${icon}</span>
-          <div style="flex:1">
-            <div style="font-size:13px;font-weight:600;color:#e2e8f0">\${esc(r.app)}</div>
-            \${statusEl}
-          </div>
-          \${badge}
-        </div>\`;
+      return '<div style="display:flex;align-items:flex-start;gap:14px;padding:12px 0;border-bottom:1px solid #1e293b">'
+           + '<span style="font-size:20px;flex-shrink:0;margin-top:1px">' + icon + '</span>'
+           + '<div style="flex:1"><div style="font-size:13px;font-weight:600;color:#e2e8f0">' + esc(r.app) + '</div>' + statusEl + '</div>'
+           + badge + '</div>';
     }).join('');
 
     // Summary counts
@@ -4527,9 +4521,9 @@ HTML = """<!DOCTYPE html>
     document.getElementById('termReportTime').textContent  = ts;
     document.getElementById('termReportRows').innerHTML    = rows;
     document.getElementById('termReportSummary').innerHTML =
-      \`<span style="color:#4ade80;font-weight:600">\${deactivated} deactivated</span>
-       \${manual > 0 ? \` · <span style="color:#fbbf24;font-weight:600">\${manual} manual action needed</span>\` : ''}
-       · <span style="color:#94a3b8">\${notFound} not found</span>\`;
+      '<span style="color:#4ade80;font-weight:600">' + deactivated + ' deactivated</span>'
+      + (manual > 0 ? ' &nbsp;·&nbsp; <span style="color:#fbbf24;font-weight:600">' + manual + ' manual action needed</span>' : '')
+      + ' &nbsp;·&nbsp; <span style="color:#94a3b8">' + notFound + ' not found</span>';
 
     document.getElementById('termReportOverlay').style.display = 'flex';
   }
