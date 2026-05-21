@@ -10,6 +10,7 @@ which are saved to iru_config.json next to this script.
 """
 
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -1157,7 +1158,6 @@ def _find_cursor(email):
 
 def _run_termination(email, actor="system"):
     """Run full termination workflow for email across all apps. Returns log entry."""
-    import concurrent.futures
     tasks = [
         _terminate_datadog,
         _terminate_braze,
@@ -5913,16 +5913,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/terminate":
             if self._require_login(): return
-            length = int(self.headers.get("Content-Length", 0))
-            body   = json.loads(self.rfile.read(length).decode())
-            email  = body.get("email", "").strip().lower()
-            if not email:
-                self._json_response({"ok": False, "error": "email required"}, status=400)
-                return
-            actor = self._actor()
-            entry = _run_termination(email, actor=actor)
-            _log_activity(actor, "Employee termination", target=email, cfg=self._cfg())
-            self._json_response({"ok": True, "entry": entry})
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body   = json.loads(self.rfile.read(length).decode())
+                email  = body.get("email", "").strip().lower()
+                if not email:
+                    self._json_response({"ok": False, "error": "email required"}, status=400)
+                    return
+                actor = self._actor()
+                entry = _run_termination(email, actor=actor)
+                _log_activity(actor, "Employee termination", target=email, cfg=self._cfg())
+                self._json_response({"ok": True, "entry": entry})
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self._json_response({"ok": False, "error": str(e)}, status=500)
 
         elif self.path == "/api/onboarding/checklist/bulk":
             length = int(self.headers.get("Content-Length", 0))
