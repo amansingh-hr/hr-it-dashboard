@@ -52,6 +52,7 @@ DATADOG_SITE     = os.environ.get("DATADOG_SITE", "datadoghq.com")
 BRAZE_API_KEY_PROD = os.environ.get("BRAZE_API_KEY_PROD", "")
 BRAZE_API_KEY_DEV  = os.environ.get("BRAZE_API_KEY_DEV", "")
 BRAZE_ENDPOINT     = os.environ.get("BRAZE_ENDPOINT", "https://rest.iad-06.braze.com")
+BRAZE_SCIM_TOKEN   = os.environ.get("BRAZE_SCIM_TOKEN", "")
 
 DATABRICKS_HOST  = os.environ.get("DATABRICKS_HOST", "")
 DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
@@ -1007,46 +1008,47 @@ def _terminate_datadog(email):
 
 
 def _terminate_braze(email):
-    """Find and permanently delete user from both Braze workspaces."""
+    """Remove company user (dashboard access) from Braze via SCIM API."""
     result = {"app": "Braze", "email": email, "found": False, "deactivated": False, "manual": False, "error": None}
-    workspaces = []
-    if BRAZE_API_KEY_PROD:
-        workspaces.append(("Prod", BRAZE_API_KEY_PROD))
-    if BRAZE_API_KEY_DEV:
-        workspaces.append(("Dev",  BRAZE_API_KEY_DEV))
-    if not workspaces:
+    if not BRAZE_SCIM_TOKEN:
         result["error"] = "Credentials not configured"
         return result
 
-    deleted_from = []
-    errors = []
-    for ws_name, api_key in workspaces:
-        hdrs = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        s, d = _http_request("POST", f"{BRAZE_ENDPOINT}/users/export/ids", hdrs,
-                              body={"email_address": email, "fields_to_export": ["external_id", "email"]})
-        if s not in (200, 201):
-            errors.append(f"{ws_name}: lookup {s}")
-            continue
-        users = d.get("users", [])
-        if not users:
-            continue
-        result["found"] = True
-        ext_ids = [u["external_id"] for u in users if u.get("external_id")]
-        if not ext_ids:
-            errors.append(f"{ws_name}: no external_id")
-            continue
-        s2, d2 = _http_request("POST", f"{BRAZE_ENDPOINT}/users/delete", hdrs,
-                                body={"external_ids": ext_ids})
-        if s2 in (200, 201):
-            deleted_from.append(ws_name)
-        else:
-            errors.append(f"{ws_name}: delete {s2}")
+    hdrs = {
+        "Authorization": f"Bearer {BRAZE_SCIM_TOKEN}",
+        "Content-Type": "application/json",
+        "X-Request-Origin": "https://hungryroot.okta.com",
+    }
 
-    if deleted_from:
+    # Search for user via SCIM filter
+    encoded = urllib.parse.quote(f'userName eq "{email}"')
+    s, d = _http_request("GET", f"{BRAZE_ENDPOINT}/scim/v2/Users?filter={encoded}", hdrs)
+    user_id = None
+    if s == 200:
+        resources = d.get("Resources", [])
+        if resources:
+            user_id = resources[0].get("id")
+
+    # Fall back to listing all users if filter returned nothing
+    if not user_id:
+        s2, d2 = _http_request("GET", f"{BRAZE_ENDPOINT}/scim/v2/Users", hdrs)
+        if s2 == 200:
+            all_users = d2.get("Resources", [])
+            match = next((u for u in all_users if u.get("userName", "").lower() == email.lower()), None)
+            if match:
+                user_id = match.get("id")
+
+    if not user_id:
+        return result  # not found
+
+    result["found"] = True
+
+    # Delete via SCIM
+    s3, d3 = _http_request("DELETE", f"{BRAZE_ENDPOINT}/scim/v2/Users/{user_id}", hdrs)
+    if s3 in (200, 204):
         result["deactivated"] = True
-        result["note"] = f"Deleted from: {', '.join(deleted_from)}"
-    if errors:
-        result["error"] = "; ".join(errors)
+    else:
+        result["error"] = f"SCIM delete failed ({s3}): {d3.get('detail', d3)}"
     return result
 
 
