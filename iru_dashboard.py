@@ -5642,7 +5642,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json_response(data.get(email, {}))
 
         elif self.path == "/api/termination-log":
-            if self._require_login(): return
+            if self._require_auth(): return
             self._json_response(_load_term_log())
 
         elif self.path == "/api/admin/activity":
@@ -5912,7 +5912,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json_response({"ok": True})
 
         elif self.path == "/api/terminate":
-            if self._require_login(): return
+            if self._require_auth(): return
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body   = json.loads(self.rfile.read(length).decode())
