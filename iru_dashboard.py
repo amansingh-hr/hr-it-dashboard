@@ -2994,6 +2994,22 @@ HTML = """<!DOCTYPE html>
     return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
+  // Global fetch wrapper — redirects to /login on session expiry (401)
+  const _nativeFetch = window.fetch;
+  window.fetch = async function(...args) {
+    const res = await _nativeFetch(...args);
+    if (res.status === 401) {
+      try {
+        const d = await res.clone().json();
+        if (d.error === 'session_expired') {
+          window.location.href = '/login';
+          return res;
+        }
+      } catch(e) {}
+    }
+    return res;
+  };
+
   function deviceConsoleUrl(d) {
     if (!d) return null;
     if (d.source === 'iru' && d.device_id)
@@ -5664,10 +5680,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _require_auth(self):
-        """Return True (and send redirect) if request is NOT authenticated."""
+        """Return True (and send redirect/401) if request is NOT authenticated."""
         token = self._get_cookie("session")
         if not _valid_session(token):
-            self._redirect("/login")
+            if self.path.startswith("/api/"):
+                # API calls get a JSON 401 so fetch() can parse it
+                self._json_response({"ok": False, "error": "session_expired"}, status=401)
+            else:
+                self._redirect("/login")
             return True
         return False
 
