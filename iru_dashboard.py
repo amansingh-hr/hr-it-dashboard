@@ -1289,6 +1289,54 @@ def _termination_sheets_append(entry, cfg=None):
         print(f"[Termination sheet error] {exc}", flush=True)
 
 
+def _termination_sheets_restore(cfg):
+    """On startup: restore termination log from the 'Termination Log' Google Sheet tab."""
+    sa_json  = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or cfg.get("google_service_account_json", "")
+    sheet_id = os.environ.get("GOOGLE_SHEET_ID")             or cfg.get("google_sheet_id", "")
+    if not sa_json or not sheet_id:
+        return
+    try:
+        service = _get_sheets_service(sa_json)
+        meta    = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        tabs    = [s["properties"]["title"] for s in meta.get("sheets", [])]
+        if "Termination Log" not in tabs:
+            return
+        rows = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range="Termination Log!A:I"
+        ).execute().get("values", [])
+        if len(rows) < 2:
+            return
+        headers = rows[0]  # [Timestamp, Actor, Employee Email, Okta, Datadog, Braze, Databricks, Pingboard, Cursor]
+        app_cols = headers[3:]  # app columns start at index 3
+        entries = []
+        for row in rows[1:]:
+            if not row:
+                continue
+            results = []
+            for i, app in enumerate(app_cols):
+                val = row[3 + i] if len(row) > 3 + i else "Not found"
+                results.append({
+                    "app":         app,
+                    "deactivated": val == "Deactivated",
+                    "manual":      val == "Manual required",
+                    "found":       val not in ("Not found", "Skipped"),
+                    "error":       None if not val.startswith("Error:") else val[7:],
+                    "note":        val if val not in ("Deactivated", "Manual required", "Not found", "Skipped") else None,
+                })
+            entries.append({
+                "id":        f"restored-{len(entries)}",
+                "timestamp": row[0] if len(row) > 0 else "",
+                "actor":     row[1] if len(row) > 1 else "",
+                "email":     row[2] if len(row) > 2 else "",
+                "results":   results,
+            })
+        if entries:
+            _save_term_log(list(reversed(entries)))  # newest first
+            print(f"[Sheets] Restored {len(entries)} termination log entries.", flush=True)
+    except Exception as exc:
+        print(f"[Termination sheet restore error] {exc}", flush=True)
+
+
 def _run_termination(email, actor="system"):
     """Run full termination workflow for email across all apps. Returns log entry."""
     tasks = [
@@ -6300,9 +6348,10 @@ def main():
         print(f"✅ Cloud mode — config from environment variables")
         if not DASHBOARD_PASS:
             print("⚠️  WARNING: DASHBOARD_PASS is not set. Login will be disabled.")
-        _sheets_restore(cfg)           # restore offboarding data from Sheet
-        _users_sheets_restore(cfg)     # restore users from Sheet
-        _activity_sheets_restore(cfg)  # restore activity log from Sheet
+        _sheets_restore(cfg)                  # restore offboarding data from Sheet
+        _users_sheets_restore(cfg)            # restore users from Sheet
+        _activity_sheets_restore(cfg)         # restore activity log from Sheet
+        _termination_sheets_restore(cfg)      # restore termination log from Sheet
     else:
         # Local mode: load from JSON or run first-time setup
         cfg = load_config()
