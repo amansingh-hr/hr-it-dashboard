@@ -6017,6 +6017,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        try:
+            self._do_POST_inner()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                self._json_response({"ok": False, "error": f"Server error: {e}"}, status=500)
+            except Exception:
+                pass
+
+    def _do_POST_inner(self):
         # All other POST routes require auth
         if self._require_auth():
             return
@@ -6071,40 +6082,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
             Timer(0.1, _do_stop).start()
 
         elif self.path == "/api/offboarding/update":
-            length = int(self.headers.get("Content-Length", 0))
-            body   = json.loads(self.rfile.read(length))
-            email  = body.get("email", "").lower().strip()
-            if not email:
-                self._json_response({"ok": False, "error": "email required"})
-                return
-            data = _load_offboarding()
-            if email not in data:
-                data[email] = {
-                    "initiated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "notes": "", "devices": {}
-                }
-            rec = data[email]
-            # Simple boolean / string fields
-            for field in ("notes", "slack_deactivated", "google_deactivated",
-                          "box_shipped", "outbound_tracking", "outbound_status",
-                          "return_tracking", "return_status"):
-                if field in body:
-                    rec[field] = body[field]
-            # Per-device received flag
-            if "device_received" in body:
-                dev_id = body.get("device_id", "")
-                if dev_id:
-                    rec.setdefault("devices", {})[dev_id] = {
-                        "received":    body["device_received"],
-                        "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                                       if body["device_received"] else None,
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body   = json.loads(self.rfile.read(length))
+                email  = body.get("email", "").lower().strip()
+                if not email:
+                    self._json_response({"ok": False, "error": "email required"})
+                    return
+                data = _load_offboarding()
+                if email not in data:
+                    data[email] = {
+                        "initiated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "notes": "", "devices": {}
                     }
-                    if body["device_received"]:
-                        _log_activity(self._actor(), "Marked device received",
-                                      target=email, detail=f"Device {dev_id}", cfg=self._cfg())
-            _save_offboarding(data)
-            _sheets_sync_bg(email, data[email], DashboardHandler.config or {})
-            self._json_response({"ok": True})
+                rec = data[email]
+                # Simple boolean / string fields
+                for field in ("notes", "slack_deactivated", "google_deactivated",
+                              "box_shipped", "outbound_tracking", "outbound_status",
+                              "return_tracking", "return_status"):
+                    if field in body:
+                        rec[field] = body[field]
+                # Per-device received flag
+                if "device_received" in body:
+                    dev_id = body.get("device_id", "")
+                    if dev_id:
+                        rec.setdefault("devices", {})[dev_id] = {
+                            "received":    body["device_received"],
+                            "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                                           if body["device_received"] else None,
+                        }
+                        if body["device_received"]:
+                            _log_activity(self._actor(), "Marked device received",
+                                          target=email, detail=f"Device {dev_id}", cfg=self._cfg())
+                _save_offboarding(data)
+                _sheets_sync_bg(email, data[email], DashboardHandler.config or {})
+                self._json_response({"ok": True})
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self._json_response({"ok": False, "error": str(e)}, status=500)
 
         elif self.path == "/api/admin/users/add":
             if self._require_admin(): return
