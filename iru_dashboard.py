@@ -1745,7 +1745,28 @@ def fetch_all_okta_users(okta_domain, okta_token):
         uid = u.get("id")
         if uid and uid not in seen:
             seen.add(uid)
-            unique.append(u)
+            # Trim to only fields used by the dashboard to reduce memory
+            p = u.get("profile", {})
+            unique.append({
+                "id":        uid,
+                "status":    u.get("status", ""),
+                "lastLogin": u.get("lastLogin", ""),
+                "profile": {
+                    "email":          p.get("email") or p.get("login", ""),
+                    "login":          p.get("login", ""),
+                    "firstName":      p.get("firstName", ""),
+                    "lastName":       p.get("lastName", ""),
+                    "title":          p.get("title", ""),
+                    "department":     p.get("department", ""),
+                    "subDepartment":  p.get("subDepartment", ""),
+                    "manager":        p.get("manager", ""),
+                    "hireDate":       p.get("hireDate", ""),
+                    "terminationDate":p.get("terminationDate", ""),
+                    "endDate":        p.get("endDate", ""),
+                    "mobilePhone":    p.get("mobilePhone", ""),
+                    "employeeNumber": p.get("employeeNumber", ""),
+                },
+            })
     print(f"[Okta] Bulk done — {len(unique)} unique users.\n")
     return unique
 
@@ -3517,7 +3538,7 @@ HTML = """<!DOCTYPE html>
     return AVATAR_COLORS[h % AVATAR_COLORS.length];
   }
   function initials(name) {
-    const parts = name.trim().split(/[\s]+/);
+    const parts = name.trim().split(/[\\s]+/);
     return parts.length >= 2
       ? (parts[0][0] + parts[parts.length-1][0]).toUpperCase()
       : (name[0] || '?').toUpperCase();
